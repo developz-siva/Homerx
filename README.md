@@ -100,6 +100,7 @@ monitor samples that client's RSSI, PHY rates, Tx retries and radio busy % about
   the iperf3 server and the *selected Wi-Fi client* runs `iperf3 -c <PC>`.
   1. On the server PC (iperf3 installed): `py iperf_agent.py` (Windows) or `python3 iperf_agent.py`. It runs `iperf3 -s`, records
      every finished test and serves them on port 8099 (`--token` to protect it). Allow TCP 5201 and 8099 through its firewall.
+     If iperf3 is not on PATH (Windows): `py iperf_agent.py --iperf-bin "C:\\path\\to\\iperf3.exe"`.
   2. Start the dashboard with `--iperf-server http://<PC IP>:8099` (`--iperf-token`, `--iperf-server-ip` optional).
   3. Select the client, choose *Throughput test - iperf3*, press **Run test**. The dashboard *arms* the test and shows the exact
      command for that client, e.g. `iperf3 -c 192.168.1.50 -t 10 -R` (add `-R` for download, `-u -b 50M` for UDP, `-P 4` for streams).

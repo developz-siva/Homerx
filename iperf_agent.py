@@ -7,6 +7,7 @@ HTTP so it can tie a test to the client you selected (by the client's IP) and ad
 
     py iperf_agent.py                         # Windows        python3 iperf_agent.py   # macOS / Linux
     py iperf_agent.py --http-port 8099 --token secret
+    py iperf_agent.py --iperf-bin "C:\\tools\\iperf3\\iperf3.exe"      # iperf3 not on PATH
 
 Then start the dashboard with:  --iperf-server http://<this PC's IP>:8099
 Needs iperf3 installed on this PC (stdlib-only Python, no packages).
@@ -94,11 +95,12 @@ def make_server(agent, bind="0.0.0.0", port=8099):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--iperf-port", type=int, default=5201, help="port the iperf3 server listens on (default 5201)")
+    ap.add_argument("--iperf-bin", default="iperf3", help='path to iperf3 if it is not on PATH, e.g. --iperf-bin "C:\\tools\\iperf3\\iperf3.exe"')
     ap.add_argument("--http-port", type=int, default=8099, help="port the dashboard reads results from (default 8099)")
     ap.add_argument("--bind", default="0.0.0.0", help="HTTP bind address (default all interfaces so the dashboard PC can reach it)")
     ap.add_argument("--token", help="optional shared secret; the dashboard must be started with the same --iperf-token")
     a = ap.parse_args()
-    agent = Agent(a.iperf_port, token=a.token)
+    agent = Agent(a.iperf_port, iperf_bin=a.iperf_bin, token=a.token)
     threading.Thread(target=agent.run_forever, daemon=True).start()
     ip = lan_ip() or "<this PC's IP>"
     print(f"iperf3 server listening on {ip}:{a.iperf_port}\nDashboard option:  --iperf-server http://{ip}:{a.http_port}" + (f" --iperf-token {a.token}" if a.token else "") +
