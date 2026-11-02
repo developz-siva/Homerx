@@ -1,5 +1,5 @@
 """Server-PC mode: iperf_agent.py on a LAN PC + the selected client running `iperf3 -c <PC>`. Real-iperf3 tests skip when absent."""
-import json, os, shutil, subprocess, threading, time, unittest
+import json, os, shutil, subprocess, sys, threading, time, unittest
 import iperf_agent as ag, speedtools as s, wifi_monitor as w
 
 FX = os.path.join(os.path.dirname(__file__), "fixtures")
@@ -114,3 +114,35 @@ class PortBusy(unittest.TestCase):
             a = ag.Agent(5743); threading.Thread(target=a.run_forever, daemon=True).start(); time.sleep(2.5)
             self.assertEqual(a.status()["state"], "error"); self.assertIn("in use", a.status()["last_error"]); self.assertEqual(a.status()["last_id"], 0)
         finally: hog.kill()
+
+import iperf_client as ic
+class ClientHelper(unittest.TestCase):
+    def test_argv_from_job(self):
+        j = {"server_ip": "10.0.0.2", "port": 5201, "mode": "udp_down", "secs": 8, "streams": 2, "rate": 25}
+        self.assertEqual(ic.build_argv(j), ["iperf3", "-c", "10.0.0.2", "-p", "5201", "-t", "8", "-P", "2", "-u", "-b", "25M", "-R"])
+        self.assertEqual(ic.build_argv({**j, "mode": "tcp_up", "streams": 1}), ["iperf3", "-c", "10.0.0.2", "-p", "5201", "-t", "8"])
+    def test_argv_rejects_bad_input(self):
+        for bad in ({"server_ip": "x; rm -rf /"}, {"mode": "evil"}):
+            with self.assertRaises(ValueError): ic.build_argv({"server_ip": "10.0.0.2", "port": 5201, "mode": "tcp_up", "secs": 5, "streams": 1, "rate": 1, **bad})
+    def test_pending_is_matched_by_ip_and_claimed_once(self):
+        be = w.SimBackend(w.Runner(None)); mac = be.cl[0][0]; be.ip_to_mac = lambda: {"192.168.1.77": mac}
+        mon = w.Monitor(be, 1, None); mon.poll()
+        self.assertEqual(mon.pending_for("192.168.1.77"), {"pending": False})
+        mon.test = {"state": "waiting", "server": True, "ips": ["192.168.1.77"], "server_ip": "192.168.1.3", "port": 5201, "mode": "tcp_down", "secs": 10, "streams": 1, "rate": 50, "claimed": False}
+        self.assertEqual(mon.pending_for("192.168.1.99"), {"pending": False})          # another device gets nothing
+        j = mon.pending_for("192.168.1.77"); self.assertTrue(j["pending"]); self.assertEqual(j["mode"], "tcp_down")
+        self.assertEqual(mon.pending_for("192.168.1.77"), {"pending": False})          # claimed: not started twice
+
+@unittest.skipUnless(shutil.which("iperf3"), "iperf3 binary not on PATH")
+class ClientHelperEndToEnd(unittest.TestCase):
+    def test_helper_runs_the_armed_test_by_itself(self):
+        a, srv, url = start_agent(port=5745); time.sleep(1.2)
+        mon, mac = monitor(url); mon.iperf_server_ip = "127.0.0.1"
+        threading.Thread(target=w.serve, args=(mon, "127.0.0.1", 8745), daemon=True).start(); time.sleep(0.7)
+        helper = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(__file__), "iperf_client.py"), "--dashboard", "http://127.0.0.1:8745"],
+                                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        try:
+            self.assertEqual(mon.start_test({"mac": mac, "traffic": "iperf3", "quality": s.MODES["tcp_up"], "secs": 3}), {"ok": True})
+            self.assertTrue(wait_state(mon, ("done", "error"), 40), mon.test_status()); st = mon.test_status()
+            self.assertEqual(st["state"], "done", st); self.assertGreater(st["result"]["mbps"], 100); self.assertEqual(st["result"]["mode"], "tcp_up")
+        finally: helper.kill(); srv.shutdown()

@@ -108,6 +108,14 @@ monitor samples that client's RSSI, PHY rates, Tx retries and radio busy % about
      from what the client actually ran, and the link metrics (RSSI, PHY rate, retries, busy %) are taken only from the
      test window. 180 s time-out, **Cancel** button. If the client is behind NAT its tests arrive from the router's IP and cannot
      be matched. For `-u ... -R` the client, not the server, measures loss/jitter.
+- **Client helper (no typing on the client)**: run `iperf_client.py` once on the Wi-Fi device and leave it running. When you press
+  **Run test** for that device, it starts `iperf3 -c <server PC> ...` by itself (duration, streams, UDP rate, `-R` all come from the dashboard).
+  Start the dashboard with `--bind 0.0.0.0` so the device can reach it (the Run-test button itself stays localhost-only). The device is
+  recognised by its IP; the dashboard and helper must not be on the same machine.
+  - **Windows:** `py iperf_client.py --dashboard http://<dashboard PC>:8080` (`--iperf-bin "C:\\path\\iperf3.exe"` if not on PATH).
+  - **Ubuntu / Linux / macOS:** `sudo apt install iperf3 python3`, then `python3 iperf_client.py --dashboard http://<dashboard PC>:8080`.
+  - **Android:** install Termux, then `pkg install python iperf3` and run the same script. Keep Termux in the foreground (or acquire its wakelock).
+  - **iPhone/iPad:** iOS cannot run background scripts, so use any iperf3 app and type the command the dashboard shows.
 - **speedtest**: internet speed of the machine running the dashboard (not of the selected client). Needs the Ookla CLI
   (`brew tap teamookla/speedtest && brew install speedtest`, Windows `winget install Ookla.Speedtest.CLI`) or `pip install speedtest-cli`.
 - Results include insights (UDP loss/jitter thresholds, high retries, busy radio) and are appended to

@@ -499,7 +499,7 @@ class Monitor:
             if not sip: return {"error": "Could not work out the server PC's LAN IP; pass --iperf-server-ip."}
             t = {"state": "waiting", "tool": "iperf3", "mode": qd.get("mode"), "mac": mac, "ip": ip, "ips": list(client["ips"]), "secs": secs, "streams": streams,
                  "rate": rate, "started": time.time(), "samples": [], "result": None, "server": True, "server_ip": sip, "port": ag.get("iperf_port", 5201),
-                 "after": ag.get("last_id", 0), "others": [], "cancel": False, "deadline": time.time() + self.arm_timeout,
+                 "after": ag.get("last_id", 0), "others": [], "cancel": False, "claimed": False, "deadline": time.time() + self.arm_timeout,
                  "util_before": next((r.get("util_pct") for r in st["radios"] if r["iface"] == client.get("iface")), None)}
             t["cmd"] = speedtools.client_cmd(sip, t["port"], t["mode"], secs, streams, rate)
             self.test = t
@@ -582,8 +582,15 @@ class Monitor:
         if not t: return {"state": "idle"}
         out = {k: t[k] for k in ("state", "tool", "mode", "mac", "ip", "secs", "streams", "rate", "result")} | {
             "elapsed": round((t.get("finished") or time.time()) - t["started"]), "samples": len(t["samples"])}
-        if t.get("server"): out |= {"server": True, "cmd": t["cmd"], "server_ip": t["server_ip"], "others": t["others"], "remaining": max(0, round(t["deadline"] - time.time()))}
+        if t.get("server"): out |= {"server": True, "cmd": t["cmd"], "server_ip": t["server_ip"], "others": t["others"], "remaining": max(0, round(t["deadline"] - time.time())), "claimed": t["claimed"]}
         return out
+
+    def pending_for(self, ip):
+        """What an iperf_client.py helper running on `ip` should do now. Matched on the requester's real source IP."""
+        t = self.test
+        if not (t and t.get("server") and t["state"] == "waiting" and ip in t["ips"] and not t["claimed"]): return {"pending": False}
+        t["claimed"] = True
+        return {"pending": True, "server_ip": t["server_ip"], "port": t["port"], "mode": t["mode"], "secs": t["secs"], "streams": t["streams"], "rate": t["rate"]}
 
     def cancel_test(self):
         t = self.test
@@ -754,7 +761,7 @@ if($('tb').dataset.cancel){await fetch('api/test/cancel',{method:'POST',headers:
 let r;try{r=await (await fetch('api/test/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mac,traffic:k,quality:$('pq').value,secs:+$('td').value,streams:+$('tsn').value,rate:+$('tr').value})})).json()}catch(e){$('tres').textContent='Could not start the test.';return}
 if(r.error){$('tres').innerHTML='<div class=hot>✖ '+esc(r.error)+'</div>';return}$('tres').textContent='Starting…';tstat()}
 async function tstat(){let s;try{s=await (await fetch('api/test/status')).json()}catch(e){return}if(s.state==='idle')return;const wait=s.state==='waiting',run=s.state==='running';$('tb').disabled=run;$('tb').textContent=run?`Running… ${s.elapsed}s`:wait?'Cancel':'Run test';if(wait)$('tb').dataset.cancel=1;else delete $('tb').dataset.cancel;
-if(wait){$('tres').innerHTML='<div class=hot style="color:inherit">⏳ <b>Armed — waiting for '+esc(s.ip)+'</b> ('+s.remaining+'s left). On that client run:<pre style="user-select:all;margin:6px 0">'+esc(s.cmd)+'</pre><span class=mut>Link metrics are being sampled ('+s.samples+' so far).'+(s.others&&s.others.length?' Ignored tests from '+esc(s.others.join(', '))+'.':'')+'</span></div>';return}
+if(wait){$('tres').innerHTML='<div class=hot style="color:inherit">⏳ <b>Armed — waiting for '+esc(s.ip)+'</b> ('+s.remaining+'s left). '+(s.claimed?'<b>The client helper picked it up and is running the test…</b> It would otherwise run:':'If the client runs iperf_client.py it starts by itself; otherwise run on that client:')+<pre style="user-select:all;margin:6px 0">'+esc(s.cmd)+'</pre><span class=mut>Link metrics are being sampled ('+s.samples+' so far).'+(s.others&&s.others.length?' Ignored tests from '+esc(s.others.join(', '))+'.':'')+'</span></div>';return}
 if(s.state==='cancelled'){$('tres').innerHTML='<span class=mut>Cancelled.</span>';return}
 if(run){$('tres').innerHTML='<span class=mut>Test in progress. Sampling link metrics ('+s.samples+' so far)…</span>';return}renderTest(s)}
 function renderTest(s){const r=s.result||{};if(!r.ok){$('tres').innerHTML='<div class=hot>✖ '+esc(r.error||'failed')+'</div>';return}const L=r.link||{};let h='<div class=tiles>';
@@ -777,6 +784,7 @@ def serve(mon, bind, port):
                 except Exception as e: body = json.dumps({"error": str(e)}).encode()
                 ct = "application/json"
             elif u.path == "/api/config": body, ct = json.dumps(mon.config()).encode(), "application/json"
+            elif u.path == "/api/test/pending": body, ct = json.dumps(mon.pending_for(self.client_address[0])).encode(), "application/json"
             elif u.path == "/api/test/status": body, ct = json.dumps(mon.test_status()).encode(), "application/json"
             elif u.path.startswith("/api/state"): body, ct = mon.snapshot().encode(), "application/json"
             elif self.path in ("/", "/index.html"): body, ct = HTML.encode(), "text/html; charset=utf-8"
