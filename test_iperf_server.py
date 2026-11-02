@@ -65,7 +65,7 @@ class AgentEndToEnd(unittest.TestCase):
         self.assertIn("already running", mon.start_test({"mac": mac, "traffic": "iperf3"}).get("error", ""))
         time.sleep(7); c = client(); c.wait(timeout=20)                            # the client starts well after arming
         self.assertTrue(wait_state(mon, ("done", "error")), mon.test_status()); st = mon.test_status(); self.assertEqual(st["state"], "done", st)
-        res = st["result"]; self.assertEqual(res["mode"], "tcp_up"); self.assertGreater(res["mbps"], 100); self.assertTrue(res["insights"]); self.assertIsNotNone(res["pred"])
+        res = st["result"]; self.assertEqual(res["mode"], "tcp_up"); self.assertGreater(res["mbps"], 100); self.assertTrue(res["insights"])
         self.assertGreaterEqual(res["link"]["n"], 1); self.assertLessEqual(res["link"]["n"], 7)     # 3 s test + 3 s slack at 1 s sampling (this Monitor uses interval=1)
         self.assertGreater(mon.test["n_raw"], res["link"]["n"] + 2, "samples taken while merely waiting must be excluded")
     def test_download_and_udp_modes_detected_from_the_client_command(self):

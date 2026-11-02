@@ -54,7 +54,7 @@ class RealIperf(unittest.TestCase):
             self.assertIn("already running", mon.start_test({"mac": mac, "traffic": "iperf3"}).get("error", ""))
             wait_done(mon)
             st = mon.test_status(); self.assertEqual(st["state"], "done", st); r = st["result"]
-            self.assertGreater(r["mbps"], 100); self.assertGreaterEqual(r["link"]["n"], 1); self.assertTrue(r["insights"]); self.assertIsNotNone(r["pred"])
+            self.assertGreater(r["mbps"], 100); self.assertGreaterEqual(r["link"]["n"], 1); self.assertTrue(r["insights"])
         finally: srv.kill()
     def test_udp_and_reverse(self):
         srv = subprocess.Popen(["iperf3", "-s", "-p", str(PORT)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); time.sleep(1)

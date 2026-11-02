@@ -166,7 +166,7 @@ def plan(client, traffic, quality=None, n=1, radios=None, offset=8.0, declared_t
     if spec.get("test"):          # measured-test entries: show the model's predicted maximum, the real number comes from Run test
         out["test"] = {"tool": spec["test"], "mode": qd.get("mode")}
         out["predicted"] = {"down_mbps": out["capacity"]["usable_down_mbps"], "up_mbps": out["capacity"]["usable_up_mbps"]}
-        out["verdict"] = {"level": "unknown", "text": "Predicted maximum from the link model is shown below. Press Run test to measure real throughput."}
+        out["verdict"] = {"level": "unknown", "text": "Press Run test to measure real throughput. The link tiles below show this client's current signal, PHY rates, retries and radio load."}
 
     if not client.get("active") and ap_tx < 40:
         out["notes"].append("This client is idle, so its PHY rate may be a low 'resting' value from management frames; "

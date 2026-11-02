@@ -87,7 +87,7 @@ Notes
 
 ## Throughput tests: iperf3 and speedtest (in the Traffic planner)
 Pick **Throughput test - iperf3 (measured)** or **Internet speed test - speedtest** in the Traffic dropdown. The card first
-shows the link model's *predicted* maximum for that client, then a **Run test** button measures the real thing while the
+shows the client's current link (RSSI, PHY rates, retries, radio busy %), then a **Run test** button measures the real thing while the
 monitor samples that client's RSSI, PHY rates, Tx retries and radio busy % about every 2 s during the test.
 
 - **iperf3** (client-specific): start a server on the client (`iperf3 -s`; phones have iperf3 apps) and allow port 5201.
@@ -110,7 +110,7 @@ monitor samples that client's RSSI, PHY rates, Tx retries and radio busy % about
      be matched. For `-u ... -R` the client, not the server, measures loss/jitter.
 - **speedtest**: internet speed of the machine running the dashboard (not of the selected client). Needs the Ookla CLI
   (`brew tap teamookla/speedtest && brew install speedtest`, Windows `winget install Ookla.Speedtest.CLI`) or `pip install speedtest-cli`.
-- Results include insights (measured vs model, UDP loss/jitter thresholds, high retries, busy radio) and are appended to
+- Results include insights (UDP loss/jitter thresholds, high retries, busy radio) and are appended to
   `tests.csv` when `--log-dir` is set.
 - Safety: tests start only from the machine running the dashboard (`--allow-remote-tests` to change), the target IP always
   comes from the client list (never free text), and the POST endpoint requires a JSON content type.

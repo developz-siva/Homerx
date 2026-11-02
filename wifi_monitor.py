@@ -572,11 +572,6 @@ class Monitor:
             res["link"] = _summarise(t["samples"], t.get("util_before"))
             if t["tool"] == "iperf3" and t["mode"].startswith("udp"): res["target_mbps"] = res.get("target_mbps") or t["rate"]
             with self.lock: st = self.state
-            client = self._find(st, t["mac"])
-            res["pred"] = None
-            if client:
-                pr = planner.plan(client, "iperf3", None, 1, {r["iface"]: r for r in st["radios"]}, self.offset).get("predicted")
-                if pr: res["pred"] = pr["up_mbps"] if str(t["mode"]).endswith("up") else pr["down_mbps"]; res["pred_down"] = pr["down_mbps"]
             res["insights"] = _test_insights(res, t)
             if self.log_dir: self._log_test(t, res)
         t["result"], t["finished"] = res, time.time()
@@ -601,7 +596,7 @@ class Monitor:
     def _log_test(self, t, res):
         os.makedirs(self.log_dir, exist_ok=True)
         path = os.path.join(self.log_dir, "tests.csv"); new = not os.path.exists(path)
-        cols = ["ts", "mac", "ip", "tool", "mode", "mbps", "down_mbps", "up_mbps", "pred", "retransmits", "jitter_ms", "loss_pct", "ping_ms",
+        cols = ["ts", "mac", "ip", "tool", "mode", "mbps", "down_mbps", "up_mbps", "retransmits", "jitter_ms", "loss_pct", "ping_ms",
                 "rssi_avg", "ap_tx_avg", "sta_tx_avg", "retry_avg", "util_avg", "util_max"]
         row = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S"), "mac": t["mac"], "ip": t["ip"], "tool": res.get("tool"), "mode": t["mode"], **res, **res.get("link", {})}
         with open(path, "a", newline="") as f:
@@ -632,7 +627,7 @@ def _ins(sev, title, detail, action=""): return {"sev": sev, "title": title, "de
 def _test_insights(res, t):
     out, L = [], res.get("link") or {}
     if res["tool"] == "iperf3":
-        mbps, pred, mode = res["mbps"], res.get("pred"), t["mode"]
+        mbps, mode = res["mbps"], t["mode"]
         if mode.startswith("udp"):
             tgt = t["rate"]
             if res.get("loss_pct") is None: out.append(_ins("info", "UDP download: loss and jitter are measured by the client", "With -R the client is the receiver, so read loss/jitter from its own iperf3 output.", "Run without -R (upload) to have the server PC record them."))
@@ -642,21 +637,15 @@ def _test_insights(res, t):
             if mbps < 0.95 * tgt: out.append(_ins("warn", f"Only {mbps:g} of {tgt:g} Mbps delivered", "The link could not sustain the requested rate.", "Lower the rate to find the ceiling, or improve the link."))
             elif res.get("loss_pct") is not None and res["loss_pct"] <= 1 and (res.get("jitter_ms") or 0) <= 30: out.append(_ins("ok", f"Sustained {tgt:g} Mbps", f"Loss {res['loss_pct']}%, jitter {res['jitter_ms']} ms: within real-time targets."))
         else:
-            if pred:
-                ratio = mbps / pred
-                if ratio < 0.3: out.append(_ins("warn", "Far below what the Wi-Fi link should carry", f"Measured {mbps:g} Mbps vs ~{pred:g} Mbps predicted from the PHY rate.",
-                                                "The bottleneck may be outside this Wi-Fi hop (the machine running iperf3 on slow Wi-Fi/powerline/100 Mbps Ethernet), the client's CPU/app, or heavy retries and interference."))
-                elif ratio < 0.7: out.append(_ins("info", "Below the link model", f"{mbps:g} of ~{pred:g} Mbps ({ratio*100:.0f}%).", "Normal when rate adaptation, retries or other devices use airtime."))
-                elif ratio <= 1.2: out.append(_ins("ok", "In line with the link model", f"{mbps:g} Mbps measured vs ~{pred:g} Mbps predicted."))
-                else: out.append(_ins("info", "Faster than the model predicted", f"{mbps:g} vs ~{pred:g} Mbps: the PHY rate sampled before the test was probably a low idle value.", "Trust the measurement; PHY rates recover under load."))
+            rng = f" (per-second {res['min_mbps']:g}–{res['max_mbps']:g})" if res.get("min_mbps") is not None else ""
+            out.append(_ins("info", f"TCP {'download' if mode.endswith('down') else 'upload'}: {mbps:g} Mbps{rng}", "Measured end to end between the client and the iperf3 server; the link tiles show the Wi-Fi conditions during the run."))
             if (res.get("retransmits") or 0) > 100: out.append(_ins("info", f"{res['retransmits']} TCP retransmits", "Packet loss or reordering on the path limited throughput."))
         if (L.get("retry_avg") or 0) >= 15: out.append(_ins("warn", f"High Wi-Fi retries during test ({L['retry_avg']}%)", "Interference or a marginal link.", "Change channel/width or move closer."))
         if (L.get("util_max") or 0) >= 70: out.append(_ins("warn", f"Radio {L['util_max']}% busy at peak", "Little airtime was left; other devices compete.", "Run the test when the network is quiet, or move the client to a quieter band."))
         if not L.get("n"): out.append(_ins("info", "No link samples captured", "The test finished before a poll completed; use a longer duration or a smaller --interval."))
     else:
-        d = res["down_mbps"]; pred = res.get("pred_down")
+        d = res["down_mbps"]
         out.append(_ins("info", f"Internet {d:g} ↓ / {res['up_mbps']:g} ↑ Mbps, ping {res.get('ping_ms')} ms", "Measured by the machine running this dashboard, not by the selected client."))
-        if pred and pred < 0.8 * d: out.append(_ins("warn", "The selected client's Wi-Fi link could be the bottleneck", f"Its predicted max is ~{pred:g} Mbps, below the {d:g} Mbps your internet delivers.", "Use an iperf3 test to this client to confirm."))
     return out
 
 ICON = {"crit": "[!!]", "warn": "[! ]", "info": "[i ]", "ok": "[ok]"}
@@ -746,8 +735,8 @@ const T=(v,l)=>`<div class=tile><b>${v}</b><span>${l}</span></div>`;
 async function plan(){const mac=$('pc').value,t=$('pt').value;if(!mac||!t){$('pr').innerHTML='<span class=mut>Select a client and a traffic type.</span>';return}
 let r;try{r=await (await fetch(`api/plan?mac=${encodeURIComponent(mac)}&traffic=${t}&quality=${encodeURIComponent($('pq').value)}&n=${$('pn').value||1}`)).json()}catch(e){return}
 if(r.error){$('pr').textContent=r.error;return}const q=r.required,l=r.link,c=r.capacity,g=r.targets;
-let h=`<div><span class="v ${r.verdict.level}">${r.test?'PREDICTION':esc(r.verdict.level.toUpperCase())}</span> <b>${esc(r.traffic)}</b> — ${esc(r.quality)} ×${r.streams}<div class=mut style="margin-top:4px">${esc(r.verdict.text)}</div></div><div class=tiles>`+
-(r.test?T(r.predicted.down_mbps+' / '+r.predicted.up_mbps,'Predicted max Mbps ↓ / ↑ (model)'):T(q.down_mbps+' / '+q.up_mbps,'Required Mbps ↓ / ↑ (avg)')+T(q.peak_down_mbps+' / '+q.peak_up_mbps,'Peak Mbps ↓ / ↑')+T(q.gb_per_hour_down+' / '+q.gb_per_hour_up,'Data GB/hour ↓ / ↑')+T(q.pps,'Packets per second'));
+let h=`<div><span class="v ${r.verdict.level}">${r.test?'THROUGHPUT TEST':esc(r.verdict.level.toUpperCase())}</span> <b>${esc(r.traffic)}</b> — ${esc(r.quality)} ×${r.streams}<div class=mut style="margin-top:4px">${esc(r.verdict.text)}</div></div><div class=tiles>`+
+(r.test?'':T(q.down_mbps+' / '+q.up_mbps,'Required Mbps ↓ / ↑ (avg)')+T(q.peak_down_mbps+' / '+q.peak_up_mbps,'Peak Mbps ↓ / ↑')+T(q.gb_per_hour_down+' / '+q.gb_per_hour_up,'Data GB/hour ↓ / ↑')+T(q.pps,'Packets per second'));
 if(c&&r.test)h+=T((c.radio_util_now_pct??'n/a')+'%','Radio busy now');else if(c)h+=T(c.usable_down_mbps+' / '+c.usable_up_mbps,'Usable Mbps ↓ / ↑ (model)')+T((c.headroom_down_x??'–')+'× / '+(c.headroom_up_x??'–')+'×','Headroom ↓ / ↑')+T(c.airtime_needed_pct+'%','Airtime this needs')+
 T((c.radio_util_now_pct??'n/a')+'% → '+c.projected_radio_util_pct+'%','Radio busy now → projected')+T(c.max_streams,'Max simultaneous streams');
 if(l&&l.rssi!=null)h+=T(l.rssi+' dBm'+(g.rssi_margin_db!=null?` (${g.rssi_margin_db>=0?'+':''}${g.rssi_margin_db} dB)`:''),'RSSI (margin vs '+g.min_rssi+' dBm needed)')+T((l.ap_tx_phy_mbps??'–')+' / '+(l.sta_tx_phy_mbps??'–'),'PHY Mbps AP→STA / STA→AP')+T((l.retry_pct??'–')+'%','Tx retries')+T(esc(l.band)+' ch '+esc(l.channel??'?'),'Band / channel');
@@ -771,7 +760,7 @@ if(run){$('tres').innerHTML='<span class=mut>Test in progress. Sampling link met
 function renderTest(s){const r=s.result||{};if(!r.ok){$('tres').innerHTML='<div class=hot>✖ '+esc(r.error||'failed')+'</div>';return}const L=r.link||{};let h='<div class=tiles>';
 if(r.mode==='speedtest')h+=T(r.down_mbps+' / '+r.up_mbps,'Internet ↓ / ↑ Mbps')+T((r.ping_ms??'–')+' ms','Ping')+T((r.jitter_ms??'–')+' ms','Jitter')+T(esc(r.server||'–'),'Server');
 else{h+=T(r.mbps+' Mbps','Measured '+((r.mode||s.mode).endsWith('up')?'upload (client to '+(s.server?'server PC':'host')+')':'download ('+(s.server?'server PC':'host')+' to client)'));
-if(r.pred)h+=T(r.pred+' Mbps','Model prediction ('+Math.round(100*r.mbps/r.pred)+'% achieved)');if(r.retransmits!=null)h+=T(r.retransmits,'TCP retransmits');
+if(r.retransmits!=null)h+=T(r.retransmits,'TCP retransmits');
 if(r.jitter_ms!=null)h+=T(r.jitter_ms+' ms','UDP jitter')+T(r.loss_pct+'%','UDP loss');if(r.min_mbps!=null)h+=T(r.min_mbps+' – '+r.max_mbps,'Per-second min – max Mbps')}
 if(L.n)h+=T(L.rssi_avg+' dBm','RSSI during test')+T((L.ap_tx_avg??'–')+' / '+(L.sta_tx_avg??'–'),'PHY Mbps AP→STA / STA→AP')+T((L.retry_avg??'–')+'% (max '+(L.retry_max??'–')+')','Tx retries during test')+T((L.util_avg??'–')+'% (max '+(L.util_max??'–')+')','Radio busy during test');
 h+='</div>';(r.insights||[]).forEach(i=>h+=row('',i));$('tres').innerHTML=h}
