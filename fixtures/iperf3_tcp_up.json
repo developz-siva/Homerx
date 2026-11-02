@@ -1,0 +1,104 @@
+{
+ "start": {
+  "connected": [
+   {
+    "socket": 5,
+    "local_host": "127.0.0.1",
+    "local_port": 42596,
+    "remote_host": "127.0.0.1",
+    "remote_port": 5201
+   }
+  ],
+  "version": "iperf 3.17.1",
+  "connecting_to": {
+   "host": "127.0.0.1",
+   "port": 5201
+  },
+  "cookie": "5tuklgsh2l5eqg7hzfabsm77op4czqxy562w",
+  "tcp_mss_default": 32768,
+  "target_bitrate": 0,
+  "fq_rate": 0,
+  "sock_bufsize": 0,
+  "sndbuf_actual": 16384,
+  "rcvbuf_actual": 131072,
+  "test_start": {
+   "protocol": "TCP",
+   "num_streams": 1,
+   "blksize": 131072,
+   "omit": 0,
+   "duration": 3,
+   "bytes": 0,
+   "blocks": 0,
+   "reverse": 1,
+   "tos": 0,
+   "target_bitrate": 0,
+   "bidir": 0,
+   "fqrate": 0,
+   "interval": 1
+  }
+ },
+ "intervals": [
+  {
+   "sum": {
+    "start": 0,
+    "end": 1.001067,
+    "seconds": 1.001067042350769,
+    "bytes": 2322989056,
+    "bits_per_second": 18564103763.080723,
+    "omitted": false,
+    "sender": false
+   }
+  },
+  {
+   "sum": {
+    "start": 1.001067,
+    "end": 2.001005,
+    "seconds": 0.9999380111694336,
+    "bytes": 2297167872,
+    "bits_per_second": 18378482236.621433,
+    "omitted": false,
+    "sender": false
+   }
+  },
+  {
+   "sum": {
+    "start": 2.001005,
+    "end": 3.000991,
+    "seconds": 0.9999859929084778,
+    "bytes": 2276196352,
+    "bits_per_second": 18209825882.697742,
+    "omitted": false,
+    "sender": false
+   }
+  }
+ ],
+ "end": {
+  "sum_sent": {
+   "start": 0,
+   "end": 3.001064,
+   "seconds": 3.001064,
+   "bytes": 6897008640,
+   "bits_per_second": 18385502315.178883,
+   "retransmits": 34,
+   "sender": false
+  },
+  "sum_received": {
+   "start": 0,
+   "end": 3.000991,
+   "seconds": 3.000991,
+   "bytes": 6896353280,
+   "bits_per_second": 18384202498.44135,
+   "sender": false
+  },
+  "cpu_utilization_percent": {
+   "host_total": 38.64368232634175,
+   "host_user": 2.53517664598458,
+   "host_system": 36.108439064229934,
+   "remote_total": 97.30793580977515,
+   "remote_user": 1.1437215935596519,
+   "remote_system": 96.16418089487784
+  },
+  "sender_tcp_congestion": "bbr",
+  "receiver_tcp_congestion": "bbr"
+ }
+}

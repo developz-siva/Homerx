@@ -17,6 +17,7 @@ Bitrates are IP-level nominal values:
 Capacity numbers are a MODEL (airtime = per-frame overhead + payload/PHY rate), not a speed test.
 """
 from advisor import advise, PROFILES
+from speedtools import MODES
 
 OVERHEAD_US = 200.0      # DIFS + avg backoff + preamble + SIFS + (Block)Ack per transmit opportunity
 
@@ -69,8 +70,20 @@ CATALOG = {
                             "Cloud gaming 4K60 (40 Mbps)": q(40, .5, pkt=1300, agg=4, lat_ms=80, est_up=True)}),
 }
 
+CATALOG["iperf3"] = dict(
+    label="Throughput test - iperf3 (measured)", test="iperf3", pkt=1400, agg=16, burst=1.0, rt=False, ac="BE", dscp="0 (BE)", min_rssi=-70,
+    targets="Measures real throughput between this machine and the client. The client must run an iperf3 server (iperf3 -s).",
+    ports="TCP/UDP 5201", default=MODES["tcp_down"], cls="Bulk", ctype="laptop",
+    qualities={name: q(0, 0, mode=m) for m, name in MODES.items()})
+CATALOG["speedtest"] = dict(
+    label="Internet speed test - speedtest (this machine)", test="speedtest", pkt=1400, agg=16, burst=1.0, rt=False, ac="BE", dscp="0 (BE)",
+    min_rssi=-70, targets="Measures the internet speed of the machine running this dashboard, not of the selected client.",
+    ports="TCP 8080/443", default="Internet speed (download + upload + ping)", cls="Bulk", ctype="laptop",
+    qualities={"Internet speed (download + upload + ping)": q(0, 0, mode="speedtest")})
+
 def catalog_public():
-    return {k: {"label": v["label"], "default": v["default"], "qualities": list(v["qualities"])} for k, v in CATALOG.items()}
+    return {k: {"label": v["label"], "default": v["default"], "qualities": list(v["qualities"]), "test": v.get("test"),
+                "modes": {n: d.get("mode") for n, d in v["qualities"].items()}} for k, v in CATALOG.items()}
 
 def _pkt_us(rate_mbps, nbytes, agg, retry):
     """time one packet occupies the air incl. amortised overhead and retries (µs)"""
@@ -150,6 +163,10 @@ def plan(client, traffic, quality=None, n=1, radios=None, offset=8.0, declared_t
     elif projected > 70: worsen("marginal", f"radio would be ~{projected:.0f}% busy (shared airtime)")
     if spec["rt"] and retry * 100 > 10: worsen("poor" if retry * 100 > 20 else "marginal", f"{retry*100:.0f}% Tx retries hurt latency/jitter of real-time media")
     out["verdict"] = {"level": level, "text": ("Link can carry this comfortably." if not reasons else (lambda t: t[0].upper() + t[1:])("; ".join(reasons)) + ".")}
+    if spec.get("test"):          # measured-test entries: show the model's predicted maximum, the real number comes from Run test
+        out["test"] = {"tool": spec["test"], "mode": qd.get("mode")}
+        out["predicted"] = {"down_mbps": out["capacity"]["usable_down_mbps"], "up_mbps": out["capacity"]["usable_up_mbps"]}
+        out["verdict"] = {"level": "unknown", "text": "Predicted maximum from the link model is shown below. Press Run test to measure real throughput."}
 
     if not client.get("active") and ap_tx < 40:
         out["notes"].append("This client is idle, so its PHY rate may be a low 'resting' value from management frames; "

@@ -1,0 +1,100 @@
+"""
+speedtools.py - run iperf3 / speedtest and return normalised results.
+
+iperf3  : measures throughput between the machine running this dashboard (or the AP, --iperf-from ap) and ONE client.
+          The client must be running an iperf3 server (`iperf3 -s`; iOS/Android have iperf3 apps).
+          Direction is from the CLIENT's point of view:  download = host -> client,  upload = client -> host (iperf3 -R).
+speedtest: internet speed of the machine running the dashboard (Ookla `speedtest` CLI or `speedtest-cli`), NOT of a selected client.
+"""
+import ipaddress, json, shlex, shutil, subprocess
+
+MODES = {"tcp_down": "TCP download (host → client)", "tcp_up": "TCP upload (client → host)",
+         "udp_down": "UDP download (host → client)", "udp_up": "UDP upload (client → host)"}
+
+def iperf3_argv(ip, mode, secs, streams, rate_mbps, port=5201):
+    ipaddress.ip_address(ip)                                   # never pass anything but a literal IP to the command line
+    if mode not in MODES: raise ValueError(f"unknown iperf3 mode {mode}")
+    argv = ["iperf3", "-c", ip, "-p", str(int(port)), "-t", str(int(secs)), "-P", str(int(streams)), "-J"]
+    if mode.startswith("tcp") and secs >= 6: argv += ["-O", "2"]            # skip TCP slow start in the totals
+    if mode.startswith("udp"): argv += ["-u", "-b", f"{float(rate_mbps):g}M"]
+    if mode.endswith("up"): argv.append("-R")
+    return argv
+
+def _series(j):
+    out = []
+    for it in j.get("intervals", []):
+        s = it.get("sum") or {}
+        if "bits_per_second" in s and not s.get("omitted"): out.append(s["bits_per_second"] / 1e6)
+    return out
+
+def parse_iperf3(text, mode):
+    try: j = json.loads(text)
+    except Exception: return {"ok": False, "error": "iperf3 gave no JSON: " + (text.strip()[:200] or "empty output")}
+    if j.get("error"): return {"ok": False, "error": _friendly(j["error"])}
+    e = j.get("end") or {}
+    ser = _series(j)
+    res = {"ok": True, "tool": "iperf3", "mode": mode, "series_mbps": [round(x, 1) for x in ser]}
+    if ser: res.update(min_mbps=round(min(ser), 1), max_mbps=round(max(ser), 1))
+    if mode.startswith("udp"):
+        s = e.get("sum") or {}; rcv = e.get("sum_received") or {}
+        res.update(mbps=round((rcv.get("bits_per_second") or s.get("bits_per_second", 0)) / 1e6, 2), jitter_ms=round(s.get("jitter_ms", 0), 2),
+                   loss_pct=round(s.get("lost_percent", 0), 2), packets=s.get("packets"))
+    else:
+        snd, rcv = e.get("sum_sent") or {}, e.get("sum_received") or {}
+        res.update(mbps=round((rcv.get("bits_per_second") or snd.get("bits_per_second", 0)) / 1e6, 2), retransmits=snd.get("retransmits"))
+    return res
+
+def _friendly(err):
+    if "Connection refused" in err or "unable to connect" in err:
+        return "Could not connect: start an iperf3 server on the client first (`iperf3 -s`) and allow port 5201 through its firewall. (" + err[:80] + ")"
+    return err
+
+def run_iperf3(ip, mode, secs=10, streams=1, rate_mbps=50, runner=None, port=5201):
+    """runner=None -> run on this machine; runner=<transport Runner> -> run on the AP."""
+    argv = iperf3_argv(ip, mode, secs, streams, rate_mbps, port)
+    try:
+        if runner is not None:
+            out = runner.run(" ".join(shlex.quote(a) for a in argv) + " 2>&1", timeout=secs + 30)
+            if "not found" in out and "{" not in out: return {"ok": False, "error": "iperf3 is not installed on the AP"}
+        else:
+            if not shutil.which("iperf3"):
+                return {"ok": False, "error": "iperf3 is not installed on this machine (macOS: brew install iperf3 · Windows: download from https://iperf.fr/iperf-download.php · Linux: apt install iperf3)"}
+            out = subprocess.run(argv, capture_output=True, text=True, timeout=secs + 30).stdout
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": "iperf3 timed out"}
+    except Exception as ex:
+        return {"ok": False, "error": f"iperf3 failed: {ex}"}
+    i = out.find("{")                                           # serial consoles may add noise before the JSON
+    return parse_iperf3(out[i:] if i >= 0 else out, mode)
+
+def parse_speedtest(text):
+    try: j = json.loads(text)
+    except Exception: return {"ok": False, "error": "speedtest gave no JSON: " + (text.strip()[:200] or "empty output")}
+    if isinstance(j.get("download"), dict):                     # Ookla CLI: bandwidth in BYTES/s
+        return {"ok": True, "tool": "speedtest", "mode": "speedtest", "down_mbps": round(j["download"]["bandwidth"] * 8 / 1e6, 1),
+                "up_mbps": round(j["upload"]["bandwidth"] * 8 / 1e6, 1), "ping_ms": (j.get("ping") or {}).get("latency"),
+                "jitter_ms": (j.get("ping") or {}).get("jitter"), "loss_pct": j.get("packetLoss"),
+                "server": ((j.get("server") or {}).get("name") or "") + " " + ((j.get("server") or {}).get("location") or ""), "isp": j.get("isp")}
+    if "download" in j:                                         # speedtest-cli: bits/s
+        sv = j.get("server") or {}
+        return {"ok": True, "tool": "speedtest-cli", "mode": "speedtest", "down_mbps": round(j["download"] / 1e6, 1),
+                "up_mbps": round(j.get("upload", 0) / 1e6, 1), "ping_ms": j.get("ping"), "server": (sv.get("sponsor") or "") + " " + (sv.get("name") or ""),
+                "isp": (j.get("client") or {}).get("isp")}
+    return {"ok": False, "error": "unrecognised speedtest output"}
+
+def run_speedtest():
+    """Try the Ookla CLI first (`speedtest`), then `speedtest-cli`."""
+    tries = []
+    if shutil.which("speedtest"): tries.append(["speedtest", "--accept-license", "--accept-gdpr", "-f", "json"])
+    if shutil.which("speedtest-cli"): tries.append(["speedtest-cli", "--json"])
+    if not tries:
+        return {"ok": False, "error": "No speedtest tool found. Install the Ookla CLI (macOS: `brew tap teamookla/speedtest && brew install speedtest`; "
+                                       "Windows: `winget install Ookla.Speedtest.CLI`) or `pip install speedtest-cli`."}
+    last = None
+    for argv in tries:
+        try: out = subprocess.run(argv, capture_output=True, text=True, timeout=120).stdout
+        except Exception as ex: last = {"ok": False, "error": f"{argv[0]} failed: {ex}"}; continue
+        r = parse_speedtest(out)
+        if r["ok"]: return r
+        last = r
+    return last

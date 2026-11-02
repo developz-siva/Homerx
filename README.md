@@ -84,3 +84,21 @@ Notes
 - Vendor web UIs that don't expose ubus (many carrier/RDK-B GUIs) can't be driven generically. Use SSH or serial for those,
   or tell me the model and I can write an adapter.
 - --backend local needs no transport (Mac only).
+
+## Throughput tests: iperf3 and speedtest (in the Traffic planner)
+Pick **Throughput test - iperf3 (measured)** or **Internet speed test - speedtest** in the Traffic dropdown. The card first
+shows the link model's *predicted* maximum for that client, then a **Run test** button measures the real thing while the
+monitor samples that client's RSSI, PHY rates, Tx retries and radio busy % about every 2 s during the test.
+
+- **iperf3** (client-specific): start a server on the client (`iperf3 -s`; phones have iperf3 apps) and allow port 5201.
+  The dashboard machine runs `iperf3 -c <client IP>`. Modes (from the client's point of view): TCP download / upload,
+  UDP download / upload at a target rate (gives jitter and packet loss - use it to validate a Teams/Zoom/voice rate).
+  Options: duration, parallel streams, UDP rate. Install iperf3 on the dashboard machine: macOS `brew install iperf3`,
+  Windows from https://iperf.fr/iperf-download.php, Linux `apt install iperf3`.
+  `--iperf-from ap` runs iperf3 on the AP instead (isolates the Wi-Fi hop; the AP needs iperf3), `--iperf-port` changes the port.
+- **speedtest**: internet speed of the machine running the dashboard (not of the selected client). Needs the Ookla CLI
+  (`brew tap teamookla/speedtest && brew install speedtest`, Windows `winget install Ookla.Speedtest.CLI`) or `pip install speedtest-cli`.
+- Results include insights (measured vs model, UDP loss/jitter thresholds, high retries, busy radio) and are appended to
+  `tests.csv` when `--log-dir` is set.
+- Safety: tests start only from the machine running the dashboard (`--allow-remote-tests` to change), the target IP always
+  comes from the client list (never free text), and the POST endpoint requires a JSON content type.

@@ -1,0 +1,9 @@
+{
+ "start": {
+  "connected": [],
+  "version": "iperf 3.17.1"
+ },
+ "intervals": [],
+ "end": {},
+ "error": "unable to connect to server - server may have stopped running or use a different port, firewall issue, etc.: Connection refused"
+}
