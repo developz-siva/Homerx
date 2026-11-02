@@ -96,6 +96,17 @@ monitor samples that client's RSSI, PHY rates, Tx retries and radio busy % about
   Options: duration, parallel streams, UDP rate. Install iperf3 on the dashboard machine: macOS `brew install iperf3`,
   Windows from https://iperf.fr/iperf-download.php, Linux `apt install iperf3`.
   `--iperf-from ap` runs iperf3 on the AP instead (isolates the Wi-Fi hop; the AP needs iperf3), `--iperf-port` changes the port.
+- **Server-PC mode (recommended for real clients - no iperf3 server needed on the phone/laptop)**: a spare PC on the LAN acts as
+  the iperf3 server and the *selected Wi-Fi client* runs `iperf3 -c <PC>`.
+  1. On the server PC (iperf3 installed): `py iperf_agent.py` (Windows) or `python3 iperf_agent.py`. It runs `iperf3 -s`, records
+     every finished test and serves them on port 8099 (`--token` to protect it). Allow TCP 5201 and 8099 through its firewall.
+  2. Start the dashboard with `--iperf-server http://<PC IP>:8099` (`--iperf-token`, `--iperf-server-ip` optional).
+  3. Select the client, choose *Throughput test - iperf3*, press **Run test**. The dashboard *arms* the test and shows the exact
+     command for that client, e.g. `iperf3 -c 192.168.1.50 -t 10 -R` (add `-R` for download, `-u -b 50M` for UDP, `-P 4` for streams).
+  4. Run it on the client. The result is matched to the client by its IP (tests from other devices are ignored), the mode is read
+     from what the client actually ran, and the link metrics (RSSI, PHY rate, retries, busy %) are taken only from the
+     test window. 180 s time-out, **Cancel** button. If the client is behind NAT its tests arrive from the router's IP and cannot
+     be matched. For `-u ... -R` the client, not the server, measures loss/jitter.
 - **speedtest**: internet speed of the machine running the dashboard (not of the selected client). Needs the Ookla CLI
   (`brew tap teamookla/speedtest && brew install speedtest`, Windows `winget install Ookla.Speedtest.CLI`) or `pip install speedtest-cli`.
 - Results include insights (measured vs model, UDP loss/jitter thresholds, high retries, busy radio) and are appended to

@@ -347,6 +347,7 @@ class Monitor:
         self.prev_surv, self.prev_flow, self.prev_sta = {}, None, {}
         self.last_t = None
         self.test, self.iperf_from, self.allow_remote_tests, self.iperf_port = None, "host", False, 5201
+        self.iperf_server, self.iperf_token, self.iperf_server_ip, self.arm_timeout = None, None, None, 180      # server-PC mode: base URL of iperf_agent.py
         self.state = {"ts": 0, "radios": [], "clients": [], "summary": {}}
         self.lock = threading.Lock()
 
@@ -436,12 +437,12 @@ class Monitor:
                           "summary": {"clients": len(clients), "active": sum(c["active"] for c in clients),
                                       "mbps_by_class": by_class}}
         t = self.test
-        if t and t["state"] == "running":                       # sample the tested client's link while the test runs
+        if t and t["state"] in ("running", "waiting"):          # sample the tested client's link while the test runs (or is armed)
             c = next((c for c in clients if c["mac"] == t["mac"]), None)
             if c:
                 r = radio_by_if.get(c["iface"], {})
                 t["samples"].append({"rssi": c["rssi"], "ap_tx": c["ap_tx_phy_mbps"], "sta_tx": c["sta_tx_phy_mbps"],
-                                     "retry": c["retry_pct"], "util": r.get("util_pct")})
+                                     "retry": c["retry_pct"], "util": r.get("util_pct"), "t": now})
         if self.log_dir: self._log(now, radios, clients)
 
     def _log(self, ts, radios, clients):
@@ -463,7 +464,7 @@ class Monitor:
 
     def sleep_for(self):          # sample faster (every <=2 s) while a throughput test is running
         t = self.test
-        return min(self.interval, 2.0) if t and t["state"] == "running" else self.interval
+        return min(self.interval, 2.0) if t and t["state"] in ("running", "waiting") else self.interval
 
     def loop(self):
         while True:
@@ -477,7 +478,7 @@ class Monitor:
 
     def start_test(self, req):
         with self.lock:
-            if self.test and self.test["state"] == "running": return {"error": "A test is already running."}
+            if self.test and self.test["state"] in ("running", "waiting"): return {"error": "A test is already running."}
             st = self.state
         mac, spec = req.get("mac", ""), planner.CATALOG.get(req.get("traffic", ""))
         if not spec or not spec.get("test"): return {"error": "That traffic type is not a measured test."}
@@ -486,15 +487,74 @@ class Monitor:
         except (TypeError, ValueError): return {"error": "Duration, streams and rate must be numbers."}
         secs, streams, rate = max(3, min(secs, 120)), max(1, min(streams, 16)), max(0.1, min(rate, 10000.0))
         client, ip = self._find(st, mac), None
+        server = bool(self.iperf_server) and spec["test"] == "iperf3"
         if spec["test"] == "iperf3":
             if not client or not client.get("ips"): return {"error": "No IP is known for that client yet; it must show an IP in the client list."}
             ip = client["ips"][0]
+        if server:
+            try: ag = self._agent("/status")
+            except Exception as e: return {"error": self._agent_err(e)}
+            if ag.get("state") == "error": return {"error": "The iperf3 server PC reports: " + (ag.get("last_error") or "error")}
+            sip = self.iperf_server_ip or ag.get("server_ip")
+            if not sip: return {"error": "Could not work out the server PC's LAN IP; pass --iperf-server-ip."}
+            t = {"state": "waiting", "tool": "iperf3", "mode": qd.get("mode"), "mac": mac, "ip": ip, "ips": list(client["ips"]), "secs": secs, "streams": streams,
+                 "rate": rate, "started": time.time(), "samples": [], "result": None, "server": True, "server_ip": sip, "port": ag.get("iperf_port", 5201),
+                 "after": ag.get("last_id", 0), "others": [], "cancel": False, "deadline": time.time() + self.arm_timeout,
+                 "util_before": next((r.get("util_pct") for r in st["radios"] if r["iface"] == client.get("iface")), None)}
+            t["cmd"] = speedtools.client_cmd(sip, t["port"], t["mode"], secs, streams, rate)
+            self.test = t
+            threading.Thread(target=self._wait_test, args=(t,), daemon=True).start()
+            return {"ok": True}
         t = {"state": "running", "tool": spec["test"], "mode": qd.get("mode"), "mac": mac, "ip": ip, "secs": secs, "streams": streams,
              "rate": rate, "started": time.time(), "samples": [], "result": None,
              "util_before": (next((r.get("util_pct") for r in st["radios"] if client and r["iface"] == client.get("iface")), None))}
         self.test = t
         threading.Thread(target=self._run_test, args=(t,), daemon=True).start()
         return {"ok": True}
+
+    def _agent(self, path):
+        import urllib.request
+        rq = urllib.request.Request(self.iperf_server.rstrip("/") + path, headers={"X-Token": self.iperf_token} if self.iperf_token else {})
+        with urllib.request.urlopen(rq, timeout=4) as r: return json.loads(r.read())
+
+    def _agent_err(self, e):
+        if getattr(e, "code", None) == 401: return "The iperf3 server PC rejected the token (check --iperf-token)."
+        return f"Cannot reach the iperf3 server PC at {self.iperf_server} ({e}). On that PC run `py iperf_agent.py` and allow TCP {self.iperf_server.rsplit(':', 1)[-1]} and 5201 through its firewall."
+
+    def _wait_test(self, t):
+        """Armed: wait for the selected client's iperf3 run to show up on the server PC, then score it."""
+        fails, res = 0, None
+        while t["state"] == "waiting":
+            if t["cancel"]: t["state"] = "cancelled"; t["finished"] = time.time(); return
+            if time.time() > t["deadline"]:
+                res = {"ok": False, "error": f"No iperf3 test from {t['ip']} arrived within {self.arm_timeout}s." + (
+                    " Tests were seen from " + ", ".join(t["others"]) + " instead; if that is the router's address the client is behind NAT and cannot be matched." if t["others"] else
+                    " Check the client can reach the server PC on that port (firewall, same subnet, Wi-Fi client isolation).")}
+                break
+            try:
+                r = self._agent(f"/results?after={t['after']}"); fails = 0
+                for x in r.get("results", []):
+                    t["after"] = max(t["after"], x["id"])
+                    p = speedtools.parse_iperf3_server(x["raw"])
+                    host = p.get("remote_host")
+                    if not p.get("ok") and not host: continue          # aborted/garbled run: nothing to match
+                    if host and host not in t["ips"]:
+                        if host not in t["others"]: t["others"].append(host)
+                        continue
+                    res = p; res["_finish"] = time.time() - x.get("age_s", 0); break
+            except Exception as e:
+                fails += 1
+                if fails >= 5: res = {"ok": False, "error": self._agent_err(e)}
+            if res: break
+            time.sleep(1.0)
+        if t["state"] != "waiting": return
+        if res.get("ok"):
+            fin = res.pop("_finish", time.time()); win = (res.get("secs") or t["secs"]) + 3                # test length + slack for omit/ramp and clock jitter
+            t["n_raw"] = len(t["samples"])
+            t["samples"] = [x for x in t["samples"] if fin - win <= x.get("t", fin) <= fin + 1]
+            t["mode"], t["secs"] = res["mode"], res.get("secs") or t["secs"]
+            if res.get("target_mbps"): t["rate"] = res["target_mbps"]
+        self._finish_test(t, res)
 
     def _run_test(self, t):
         try:
@@ -505,9 +565,12 @@ class Monitor:
                 res = speedtools.run_speedtest()
         except Exception as e:
             res = {"ok": False, "error": f"test failed: {e}"}
+        self._finish_test(t, res)
+
+    def _finish_test(self, t, res):
         if res.get("ok"):
             res["link"] = _summarise(t["samples"], t.get("util_before"))
-            if t["tool"] == "iperf3" and t["mode"].startswith("udp"): res["target_mbps"] = t["rate"]
+            if t["tool"] == "iperf3" and t["mode"].startswith("udp"): res["target_mbps"] = res.get("target_mbps") or t["rate"]
             with self.lock: st = self.state
             client = self._find(st, t["mac"])
             res["pred"] = None
@@ -522,8 +585,18 @@ class Monitor:
     def test_status(self):
         t = self.test
         if not t: return {"state": "idle"}
-        return {k: t[k] for k in ("state", "tool", "mode", "mac", "ip", "secs", "streams", "rate", "result")} | {
+        out = {k: t[k] for k in ("state", "tool", "mode", "mac", "ip", "secs", "streams", "rate", "result")} | {
             "elapsed": round((t.get("finished") or time.time()) - t["started"]), "samples": len(t["samples"])}
+        if t.get("server"): out |= {"server": True, "cmd": t["cmd"], "server_ip": t["server_ip"], "others": t["others"], "remaining": max(0, round(t["deadline"] - time.time()))}
+        return out
+
+    def cancel_test(self):
+        t = self.test
+        if t and t["state"] == "waiting": t["cancel"] = True; return {"ok": True}
+        return {"error": "No armed test to cancel."}
+
+    def config(self):
+        return {"iperf_server": bool(self.iperf_server)}
 
     def _log_test(self, t, res):
         os.makedirs(self.log_dir, exist_ok=True)
@@ -562,11 +635,12 @@ def _test_insights(res, t):
         mbps, pred, mode = res["mbps"], res.get("pred"), t["mode"]
         if mode.startswith("udp"):
             tgt = t["rate"]
-            if res["loss_pct"] > 5: out.append(_ins("crit", f"UDP loss {res['loss_pct']}%", f"At {tgt:g} Mbps the link drops {res['loss_pct']}% of packets.", "Real-time media at this rate would glitch; lower the rate or fix signal/airtime."))
+            if res.get("loss_pct") is None: out.append(_ins("info", "UDP download: loss and jitter are measured by the client", "With -R the client is the receiver, so read loss/jitter from its own iperf3 output.", "Run without -R (upload) to have the server PC record them."))
+            elif res["loss_pct"] > 5: out.append(_ins("crit", f"UDP loss {res['loss_pct']}%", f"At {tgt:g} Mbps the link drops {res['loss_pct']}% of packets.", "Real-time media at this rate would glitch; lower the rate or fix signal/airtime."))
             elif res["loss_pct"] > 1: out.append(_ins("warn", f"UDP loss {res['loss_pct']}%", "Above the ~1% that voice/video calls tolerate.", "Check retries and channel busy % below."))
-            if res["jitter_ms"] > 30: out.append(_ins("warn", f"UDP jitter {res['jitter_ms']} ms", "Above the ~30 ms real-time media guideline.", "Look for airtime contention or retries."))
+            if (res.get("jitter_ms") or 0) > 30: out.append(_ins("warn", f"UDP jitter {res['jitter_ms']} ms", "Above the ~30 ms real-time media guideline.", "Look for airtime contention or retries."))
             if mbps < 0.95 * tgt: out.append(_ins("warn", f"Only {mbps:g} of {tgt:g} Mbps delivered", "The link could not sustain the requested rate.", "Lower the rate to find the ceiling, or improve the link."))
-            elif res["loss_pct"] <= 1 and res["jitter_ms"] <= 30: out.append(_ins("ok", f"Sustained {tgt:g} Mbps", f"Loss {res['loss_pct']}%, jitter {res['jitter_ms']} ms: within real-time targets."))
+            elif res.get("loss_pct") is not None and res["loss_pct"] <= 1 and (res.get("jitter_ms") or 0) <= 30: out.append(_ins("ok", f"Sustained {tgt:g} Mbps", f"Loss {res['loss_pct']}%, jitter {res['jitter_ms']} ms: within real-time targets."))
         else:
             if pred:
                 ratio = mbps / pred
@@ -679,20 +753,24 @@ T((c.radio_util_now_pct??'n/a')+'% → '+c.projected_radio_util_pct+'%','Radio b
 if(l&&l.rssi!=null)h+=T(l.rssi+' dBm'+(g.rssi_margin_db!=null?` (${g.rssi_margin_db>=0?'+':''}${g.rssi_margin_db} dB)`:''),'RSSI (margin vs '+g.min_rssi+' dBm needed)')+T((l.ap_tx_phy_mbps??'–')+' / '+(l.sta_tx_phy_mbps??'–'),'PHY Mbps AP→STA / STA→AP')+T((l.retry_pct??'–')+'%','Tx retries')+T(esc(l.band)+' ch '+esc(l.channel??'?'),'Band / channel');
 h+='</div><div class=mut style="line-height:1.6"><b>QoS:</b> WMM '+esc(r.qos.wmm_ac)+' · DSCP '+esc(r.qos.dscp)+' · '+esc(r.qos.ports)+'<br><b>Targets:</b> '+esc(g.summary)+'</div>';
 (r.insights||[]).forEach(i=>h+=row('',i));(r.notes||[]).forEach(n=>h+='<div class=mut style="margin-top:6px">ℹ '+esc(n)+'</div>');$('pr').innerHTML=h}
-async function boot(){try{CAT=await (await fetch('api/catalog')).json()}catch(e){return}
+let SRV=false;
+async function boot(){try{CAT=await (await fetch('api/catalog')).json();SRV=(await (await fetch('api/config')).json()).iperf_server}catch(e){return}
 $('pt').innerHTML='<option value="">— select traffic —</option>'+Object.entries(CAT).map(([k,v])=>`<option value="${k}">${esc(v.label)}</option>`).join('');
 $('pt').onchange=()=>{fillQual();testUI();plan()};$('pq').addEventListener('change',testUI);['pc','pq','pn'].forEach(i=>$(i).onchange=plan);$('tb').onclick=runTest;setInterval(tstat,1000)}
 function testUI(){const k=$('pt').value,c=CAT&&CAT[k];$('tp').style.display=c&&c.test?'block':'none';if(!c||!c.test)return;const m=c.modes[$('pq').value]||'',ip=c.test==='iperf3';
 $('tdl').style.display=ip?'':'none';$('tsl').style.display=ip?'':'none';$('trl').style.display=(ip&&m.startsWith('udp'))?'':'none';
-$('tn').textContent=ip?"Needs an iperf3 server on the selected client (run: iperf3 -s; phones have iperf3 apps) with port 5201 allowed. Download = host to client, upload = client to host. Link metrics are sampled about every 2 s while the test runs.":"Runs on the machine running this dashboard: it measures that machine's internet speed, not the selected client's."}
+$('tn').textContent=ip&&SRV?"Server-PC mode: press Run test, then run the shown iperf3 command on the selected Wi-Fi client. Download = add -R. The result is tied to the client by its IP; link metrics are captured during the run.":ip?"Needs an iperf3 server on the selected client (run: iperf3 -s; phones have iperf3 apps) with port 5201 allowed. Download = host to client, upload = client to host. Link metrics are sampled about every 2 s while the test runs.":"Runs on the machine running this dashboard: it measures that machine's internet speed, not the selected client's."}
 async function runTest(){const mac=$('pc').value,k=$('pt').value;if(!mac||!k){$('tres').textContent='Select a client first.';return}
+if($('tb').dataset.cancel){await fetch('api/test/cancel',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});return}
 let r;try{r=await (await fetch('api/test/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mac,traffic:k,quality:$('pq').value,secs:+$('td').value,streams:+$('tsn').value,rate:+$('tr').value})})).json()}catch(e){$('tres').textContent='Could not start the test.';return}
 if(r.error){$('tres').innerHTML='<div class=hot>✖ '+esc(r.error)+'</div>';return}$('tres').textContent='Starting…';tstat()}
-async function tstat(){let s;try{s=await (await fetch('api/test/status')).json()}catch(e){return}if(s.state==='idle')return;const run=s.state==='running';$('tb').disabled=run;$('tb').textContent=run?`Running… ${s.elapsed}s`:'Run test';
+async function tstat(){let s;try{s=await (await fetch('api/test/status')).json()}catch(e){return}if(s.state==='idle')return;const wait=s.state==='waiting',run=s.state==='running';$('tb').disabled=run;$('tb').textContent=run?`Running… ${s.elapsed}s`:wait?'Cancel':'Run test';if(wait)$('tb').dataset.cancel=1;else delete $('tb').dataset.cancel;
+if(wait){$('tres').innerHTML='<div class=hot style="color:inherit">⏳ <b>Armed — waiting for '+esc(s.ip)+'</b> ('+s.remaining+'s left). On that client run:<pre style="user-select:all;margin:6px 0">'+esc(s.cmd)+'</pre><span class=mut>Link metrics are being sampled ('+s.samples+' so far).'+(s.others&&s.others.length?' Ignored tests from '+esc(s.others.join(', '))+'.':'')+'</span></div>';return}
+if(s.state==='cancelled'){$('tres').innerHTML='<span class=mut>Cancelled.</span>';return}
 if(run){$('tres').innerHTML='<span class=mut>Test in progress. Sampling link metrics ('+s.samples+' so far)…</span>';return}renderTest(s)}
 function renderTest(s){const r=s.result||{};if(!r.ok){$('tres').innerHTML='<div class=hot>✖ '+esc(r.error||'failed')+'</div>';return}const L=r.link||{};let h='<div class=tiles>';
 if(r.mode==='speedtest')h+=T(r.down_mbps+' / '+r.up_mbps,'Internet ↓ / ↑ Mbps')+T((r.ping_ms??'–')+' ms','Ping')+T((r.jitter_ms??'–')+' ms','Jitter')+T(esc(r.server||'–'),'Server');
-else{h+=T(r.mbps+' Mbps','Measured '+(String(s.mode).endsWith('up')?'upload (client to host)':'download (host to client)'));
+else{h+=T(r.mbps+' Mbps','Measured '+((r.mode||s.mode).endsWith('up')?'upload (client to '+(s.server?'server PC':'host')+')':'download ('+(s.server?'server PC':'host')+' to client)'));
 if(r.pred)h+=T(r.pred+' Mbps','Model prediction ('+Math.round(100*r.mbps/r.pred)+'% achieved)');if(r.retransmits!=null)h+=T(r.retransmits,'TCP retransmits');
 if(r.jitter_ms!=null)h+=T(r.jitter_ms+' ms','UDP jitter')+T(r.loss_pct+'%','UDP loss');if(r.min_mbps!=null)h+=T(r.min_mbps+' – '+r.max_mbps,'Per-second min – max Mbps')}
 if(L.n)h+=T(L.rssi_avg+' dBm','RSSI during test')+T((L.ap_tx_avg??'–')+' / '+(L.sta_tx_avg??'–'),'PHY Mbps AP→STA / STA→AP')+T((L.retry_avg??'–')+'% (max '+(L.retry_max??'–')+')','Tx retries during test')+T((L.util_avg??'–')+'% (max '+(L.util_max??'–')+')','Radio busy during test');
@@ -709,6 +787,7 @@ def serve(mon, bind, port):
                 try: body = json.dumps(mon.plan(qs.get("mac", ""), qs.get("traffic", "video"), qs.get("quality"), qs.get("n", 1))).encode()
                 except Exception as e: body = json.dumps({"error": str(e)}).encode()
                 ct = "application/json"
+            elif u.path == "/api/config": body, ct = json.dumps(mon.config()).encode(), "application/json"
             elif u.path == "/api/test/status": body, ct = json.dumps(mon.test_status()).encode(), "application/json"
             elif u.path.startswith("/api/state"): body, ct = mon.snapshot().encode(), "application/json"
             elif self.path in ("/", "/index.html"): body, ct = HTML.encode(), "text/html; charset=utf-8"
@@ -721,8 +800,9 @@ def serve(mon, bind, port):
             if "application/json" not in (self.headers.get("Content-Type") or ""): self.send_error(415); return   # forces a CORS preflight for cross-site pages
             try: req = json.loads(self.rfile.read(min(int(self.headers.get("Content-Length") or 0), 10000)) or b"{}")
             except Exception: req = {}
-            if u.path != "/api/test/start": self.send_error(404); return
-            body = json.dumps(mon.start_test(req)).encode()
+            if u.path == "/api/test/start": body = json.dumps(mon.start_test(req)).encode()
+            elif u.path == "/api/test/cancel": body = json.dumps(mon.cancel_test()).encode()
+            else: self.send_error(404); return
             self.send_response(200); self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
         def log_message(self, *a): pass
@@ -755,6 +835,10 @@ def main():
     ap.add_argument("--iperf-from", choices=["host", "ap"], default="host",
                     help="where iperf3 runs for the dashboard's throughput test: this machine (default) or on the AP (AP needs iperf3 installed)")
     ap.add_argument("--iperf-port", type=int, default=5201, help="iperf3 server port on the client (default 5201)")
+    ap.add_argument("--iperf-server", metavar="URL", help="server-PC mode: URL of iperf_agent.py on a LAN PC (e.g. http://192.168.1.50:8099). "
+                    "Run test then waits for the selected client to run `iperf3 -c <that PC>`")
+    ap.add_argument("--iperf-token", help="shared secret, if iperf_agent.py was started with --token")
+    ap.add_argument("--iperf-server-ip", help="IP the clients should connect to, if different from what the agent reports")
     ap.add_argument("--allow-remote-tests", action="store_true", help="let other machines on the LAN start tests (default: only this machine)")
     ap.add_argument("--once", action="store_true", help="two polls, print table, exit (no web server)")
     ap.add_argument("--console", action="store_true", help="print table every interval as well")
@@ -783,6 +867,7 @@ def main():
     be.max_flows = a.max_flows if a.max_flows is not None else {"serial": 300, "ubus": 400}.get(a.transport, 2000)
     mon = Monitor(be, a.interval, a.log_dir, types, a.band_offset)
     mon.iperf_from, mon.allow_remote_tests, mon.iperf_port = a.iperf_from, a.allow_remote_tests, a.iperf_port
+    mon.iperf_server, mon.iperf_token, mon.iperf_server_ip = a.iperf_server, a.iperf_token, a.iperf_server_ip
     if a.once:
         mon.poll(); time.sleep(a.interval); mon.poll(); print_table(mon.state); print_insights(mon.state); return
     mon.poll()

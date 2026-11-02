@@ -24,7 +24,7 @@ def _series(j):
     out = []
     for it in j.get("intervals", []):
         s = it.get("sum") or {}
-        if "bits_per_second" in s and not s.get("omitted"): out.append(s["bits_per_second"] / 1e6)
+        if "bits_per_second" in s and not s.get("omitted") and s.get("seconds", 1) >= 0.5: out.append(s["bits_per_second"] / 1e6)
     return out
 
 def parse_iperf3(text, mode):
@@ -42,6 +42,46 @@ def parse_iperf3(text, mode):
     else:
         snd, rcv = e.get("sum_sent") or {}, e.get("sum_received") or {}
         res.update(mbps=round((rcv.get("bits_per_second") or snd.get("bits_per_second", 0)) / 1e6, 2), retransmits=snd.get("retransmits"))
+    return res
+
+def client_cmd(server_ip, port, mode, secs, streams, rate_mbps):
+    """The command the Wi-Fi client should run against the server PC."""
+    ipaddress.ip_address(server_ip)
+    c = f"iperf3 -c {server_ip}" + (f" -p {int(port)}" if int(port) != 5201 else "") + f" -t {int(secs)}"
+    if int(streams) > 1: c += f" -P {int(streams)}"
+    if mode.startswith("udp"): c += f" -u -b {float(rate_mbps):g}M"
+    if mode.endswith("down"): c += " -R"
+    return c
+
+def norm_host(h):
+    h = (h or "").strip()
+    return h[7:] if h.lower().startswith("::ffff:") else h          # dual-stack sockets report IPv4 peers as ::ffff:a.b.c.d
+
+def parse_iperf3_server(text):
+    """Parse the JSON an `iperf3 -s -J` process prints after ONE test. The mode, peer and settings come from the
+    server's own record, so the same code handles every client command. Direction is from the CLIENT's view:
+    reverse=0 -> the client sent (upload), reverse=1 -> the server sent (download)."""
+    try: j = json.loads(text)
+    except Exception: return {"ok": False, "error": "iperf3 server gave no JSON: " + (text.strip()[:200] or "empty output")}
+    if j.get("error"): return {"ok": False, "error": _friendly(j["error"])}
+    st = (j.get("start") or {}); ts = st.get("test_start") or {}; e = j.get("end") or {}
+    conn = (st.get("connected") or [{}])[0]
+    udp = str(ts.get("protocol", "")).upper() == "UDP"; down = bool(ts.get("reverse"))
+    mode = ("udp_" if udp else "tcp_") + ("down" if down else "up")
+    ser = _series(j)
+    res = {"ok": True, "tool": "iperf3", "mode": mode, "remote_host": norm_host(conn.get("remote_host")), "secs": ts.get("duration"),
+           "streams": ts.get("num_streams"), "series_mbps": [round(x, 1) for x in ser]}
+    if ser: res.update(min_mbps=round(min(ser), 1), max_mbps=round(max(ser), 1))
+    snd, rcv, tot = e.get("sum_sent") or {}, e.get("sum_received") or {}, e.get("sum") or {}
+    bps = rcv.get("bits_per_second") or snd.get("bits_per_second") or tot.get("bits_per_second") or 0   # exactly one side is filled in
+    if not bps and not e: return {"ok": False, "error": "The test ended before it produced a result (client disconnected?)."}
+    res["mbps"] = round(bps / 1e6, 2)
+    if udp:
+        res["target_mbps"] = round((st.get("target_bitrate") or ts.get("target_bitrate") or 0) / 1e6, 2) or None
+        if not down:                                              # the server is the receiver, so it measured jitter and loss
+            res.update(jitter_ms=round(tot.get("jitter_ms", 0), 2), loss_pct=round(tot.get("lost_percent", 0), 2), packets=tot.get("packets"))
+        else: res.update(jitter_ms=None, loss_pct=None)           # the CLIENT measures those for -R; they appear in its own output
+    elif down: res["retransmits"] = snd.get("retransmits")
     return res
 
 def _friendly(err):
