@@ -47,15 +47,17 @@ def advise(c, ctype, rssi_hist, mix, radios, offset=8.0):
     if rssi is None or band not in ("2.4G", "5G", "6G"):
         return [_i("info", "No RSSI / band data", "The AP did not report signal for this client.")], None
     on24 = band == "2.4G"
-    other = "5G" if on24 else "2.4G"
-    est_other = rssi + (-offset if on24 else offset)           # estimated RSSI on the other band
+    other = "5G" if band in ("2.4G", "6G") else "2.4G"          # 6 GHz clients fall back to 5 GHz first
+    est_other = rssi - offset if on24 else (rssi + 3 if band == "6G" else rssi + offset)   # estimated RSSI on the other band
+    hn = "6 GHz" if band == "6G" else "5 GHz"
     min_here, min_other = p["min_rssi"][("2.4G" if on24 else "5G")], p["min_rssi"][other]
     radio = radios.get(c["iface"], {}); util = radio.get("util_pct")
     other_radio = next((r for r in radios.values() if r.get("band") == other), None)
     other_util = other_radio.get("util_pct") if other_radio else None
     down_up = max(c.get("up_mbps") or 0, c.get("down_mbps") or 0)
     advice = {"stay": True, "target_band": band, "est_rssi_other": round(est_other, 1)}
-    est_note = f"(est. {other} RSSI ≈ {est_other:.0f} dBm, derived from {rssi:.0f} dBm {band} with a {offset:.0f} dB band offset)"
+    off_used = 3 if band == "6G" else offset
+    est_note = f"(est. {other} RSSI ≈ {est_other:.0f} dBm, derived from {rssi:.0f} dBm {band} with a {off_used:.0f} dB band offset)"
 
     # ---- A. band fit --------------------------------------------------------------------------------------
     def move(to, sev, title, why, how):
@@ -72,17 +74,18 @@ def advise(c, ctype, rssi_hist, mix, radios, offset=8.0):
                               "Improve coverage (move AP closer, add a wired/mesh node) rather than forcing 5 GHz."))
         else:
             if rssi < min_here:
-                if p["need_mbps"] <= 10 and est_other >= p["min_rssi"]["2.4G"] + BAND_MARGIN:
-                    move("2.4G", "warn", "5 GHz signal too weak - 2.4 GHz is the better fallback",
-                         f"{rssi:.0f} dBm is below the {min_here} dBm target; light use ({p['need_mbps']} Mbps) fits 2.4 GHz.",
-                         "Lower max rate but steadier link. Better fix: add coverage.")
+                if (band == "6G" or p["need_mbps"] <= 10) and est_other >= min_other + (0 if band == "6G" else BAND_MARGIN):
+                    move(other, "warn", f"{hn} signal too weak - {other} is the better fallback",
+                         f"{rssi:.0f} dBm is below the {min_here} dBm target; {other} should hold up better.",
+                         "Lower max rate but steadier link. Better fix: add coverage." if band != "6G" else
+                         "Let the client roam to 5 GHz (BSS-transition / band steering), or move the AP/client closer.")
                 else:
-                    out.append(_i("crit" if rssi < min_here - 5 else "warn", "Weak 5 GHz signal",
+                    out.append(_i("crit" if rssi < min_here - 5 else "warn", f"Weak {hn} signal",
                                   f"{rssi:.0f} dBm vs ≥ {min_here} dBm needed for ~{p['need_mbps']} Mbps. "
                                   f"2.4 GHz would not fix throughput for a {ctype}.",
                                   "Move the AP/client closer, add a wired-backhaul AP/mesh node, or raise AP Tx power."))
             else:
-                out.append(_i("ok", "Correct band", f"{ctype} on 5 GHz at {rssi:.0f} dBm."))
+                out.append(_i("ok", "Correct band", f"{ctype} on {hn} at {rssi:.0f} dBm."))
     else:  # prefers 2.4G (iot, camera, speaker)
         heavy = ctype == "camera" and (c.get("up_mbps") or 0) >= 3
         if on24:
@@ -97,14 +100,14 @@ def advise(c, ctype, rssi_hist, mix, radios, offset=8.0):
         else:
             if rssi < min_here:
                 move("2.4G", "warn", "Move to 2.4 GHz for range",
-                     f"{ctype} on 5 GHz at {rssi:.0f} dBm (target ≥ {min_here}); 2.4 GHz gains range for low-rate devices.",
+                     f"{ctype} on {hn} at {rssi:.0f} dBm (target ≥ {min_here}); 2.4 GHz gains range for low-rate devices.",
                      "Use a 2.4 GHz-only SSID for IoT; this also keeps their slow frames off the 5 GHz airtime.")
             elif ctype in ("iot", "speaker") or (ctype == "camera" and not heavy):
-                out.append(_i("info", "Works on 5 GHz, but 2.4 GHz is the usual home for this device",
+                out.append(_i("info", f"Works on {hn}, but 2.4 GHz is the usual home for this device",
                               f"Signal is fine ({rssi:.0f} dBm) so it's not urgent.",
                               "Optional: pin to a 2.4 GHz IoT SSID to keep low-rate traffic off 5 GHz and gain range."))
             else:
-                out.append(_i("ok", "Correct band", f"{ctype} on 5 GHz at {rssi:.0f} dBm."))
+                out.append(_i("ok", "Correct band", f"{ctype} on {hn} at {rssi:.0f} dBm."))
 
     if rssi < -75 and not any(i["sev"] == "crit" for i in out):
         out.append(_i("crit", "Very weak signal", f"{rssi:.0f} dBm sustained.", "Expect low rates and drops; fix coverage."))

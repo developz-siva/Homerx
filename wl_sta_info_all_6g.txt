@@ -1,0 +1,157 @@
+# wl -i wl1 sta_info all
+[VER 8] STA aa:bb:cc:00:00:01:
+         chanspec 6g101/320-2 (0x7043)
+         aid:23
+         rateset [ 6 9 12 18 24 36 48 54 ]
+         idle 4 seconds
+         in network 767 seconds
+         state: AUTHENTICATED ASSOCIATED AUTHORIZED
+         connection: SECURED
+         auth: WPA3-SAE-PSK
+         crypto: AES_CCM
+         flags 0x48c1c03a: WME HE_CAP AMPDU AMSDU GBL_RCLASS MBO_CAP EHT_CAP
+         flags2 0x0:
+         HT caps 0x0:
+         HE caps 0xe66a9: LDPC HE-HTC SU&MU-BFE
+         OMI 0x1301: 320Mhz rx=2ss tx=2ss ER_SU_DISABLE
+         EHT caps 0x104: SU&MU-BFE
+         tx total pkts: 95
+         tx total bytes: 4135
+         tx ucast pkts: 95
+         tx ucast bytes: 4135
+         tx mcast/bcast pkts: 0
+         tx mcast/bcast bytes: 0
+         tx failures: 0
+         rx data pkts: 477
+         rx data bytes: 47945
+         rx data dur: 0
+         rx ucast pkts: 344
+         rx ucast bytes: 27541
+         rx mcast/bcast pkts: 133
+         rx mcast/bcast bytes: 20404
+         rate of last tx pkt: 3843080 kbps - 2177770 kbps
+         rate of last rx pkt: 735000 kbps
+         median tx rate: 3629580 kbps
+         median rx rate: 735000 kbps
+         rx decrypt succeeds: 186
+         rx decrypt failures: 3
+         tx data pkts retried: 0
+         per antenna rssi of last rx data frame: -66 0 0 0
+         per antenna average rssi of rx data frames: -65 0 0 0
+         per antenna noise floor: -82 0 0 0
+         tx total pkts sent: 95
+         tx pkts retries: 41
+         tx pkts retry exhausted: 0
+         rx total pkts retried: 30
+         tx acked pkts: 95
+MCS SET : [ ]
+HE SET  :
+            20/40/80 MHz:
+                NSS1 Tx: 0-11        Rx: 0-11
+                NSS2 Tx: 0-11        Rx: ---
+            160 MHz:
+                NSS1 Tx: 0-11        Rx: 0-11
+                NSS2 Tx: 0-11        Rx: ---
+EHT SET  :
+            20/40/80 MHz:
+                NSS1 Tx: 0-13        Rx: 0-13
+                NSS2 Tx: 0-13        Rx: ---
+            160 MHz:
+                NSS1 Tx: 0-13        Rx: 0-13
+                NSS2 Tx: 0-13        Rx: ---
+            320 MHz:
+                NSS1 Tx: 0-13        Rx: 0-13
+                NSS2 Tx: 0-13        Rx: ---
+smoothed rssi: -65
+tx nrate
+eht mcs 9 Nss 2 Tx Exp 2 bw320 txbf ldpc 2xLTF GI 0.8us auto
+rx nrate
+eht mcs 4 Nss 1 Tx Exp 0 bw320 ldpc 4xLTF GI 3.2us auto
+wnm
+0x101:  BSS-Transition  Notification
+link bandwidth = 320 MHZ
+Max Rate = 2268 Mbps
+RRM capability = 0x0
+Frequency Bands Supported: 2.4G 5G 6G
+eml capabilities : 0x0
+[VER 8] STA 22:bb:cc:00:00:02:
+         chanspec 6g101/320-2 (0x7043)
+         aid:20
+         rateset [ 6 9 12 18 24 36 48 54 ]
+         idle 6 seconds
+         in network 173149 seconds
+         state: AUTHENTICATED ASSOCIATED AUTHORIZED
+         connection: SECURED
+         auth: WPA3-SAE-PSK
+         crypto: AES_CCM
+         flags 0x48c1c13a: WME PS HE_CAP AMPDU AMSDU GBL_RCLASS MBO_CAP EHT_CAP
+         flags2 0x0:
+         HT caps 0x0:
+         HE caps 0xe66b9: LDPC HE-HTC SU-BFR SU&MU-BFE
+         OMI 0x1301: 320Mhz rx=2ss tx=2ss ER_SU_DISABLE
+         TWT info 0x1: CAPABLE
+         EHT caps 0x115: SU-BFR SU&MU-BFE
+         tx total pkts: 15946
+         tx total bytes: 92804
+         tx ucast pkts: 15946
+         tx ucast bytes: 92804
+         tx mcast/bcast pkts: 0
+         tx mcast/bcast bytes: 0
+         tx failures: 0
+         rx data pkts: 31939
+         rx data bytes: 2259088
+         rx data dur: 0
+         rx ucast pkts: 31918
+         rx ucast bytes: 2255562
+         rx mcast/bcast pkts: 21
+         rx mcast/bcast bytes: 3526
+         rate of last tx pkt: 1633330 kbps - 272220 kbps
+         rate of last rx pkt: 6000 kbps
+         median tx rate: 1729410 kbps
+         median rx rate: 144110 kbps
+         rx decrypt succeeds: 339
+         rx decrypt failures: 0
+         tx data pkts retried: 0
+         per antenna rssi of last rx data frame: -71 0 0 0
+         per antenna average rssi of rx data frames: -73 0 0 0
+         per antenna noise floor: -82 0 0 0
+         tx total pkts sent: 15946
+         tx pkts retries: 391
+         tx pkts retry exhausted: 0
+         rx total pkts retried: 547
+         tx acked pkts: 15946
+MCS SET : [ ]
+HE SET  :
+            20/40/80 MHz:
+                NSS1 Tx: 0-11        Rx: 0-11
+                NSS2 Tx: 0-11        Rx: ---
+            160 MHz:
+                NSS1 Tx: 0-11        Rx: 0-11
+                NSS2 Tx: 0-11        Rx: ---
+EHT SET  :
+            20/40/80 MHz:
+                NSS1 Tx: 0-13        Rx: 0-13
+                NSS2 Tx: 0-13        Rx: ---
+            160 MHz:
+                NSS1 Tx: 0-13        Rx: 0-13
+                NSS2 Tx: 0-13        Rx: ---
+            320 MHz:
+                NSS1 Tx: 0-13        Rx: 0-13
+                NSS2 Tx: 0-13        Rx: ---
+smoothed rssi: -73
+tx nrate
+eht mcs 4 Nss 2 Tx Exp 2 bw320 ldpc 2xLTF GI 1.6us auto
+rx nrate
+legacy rate 6 Mbps stf mode 0 auto
+wnm
+0x1:  BSS-Transition
+VENDOR OUI VALUE[0] 00:50:F2
+VENDOR OUI VALUE[1] 8C:FD:F0
+VENDOR OUI VALUE[2] 00:00:F0
+VENDOR OUI VALUE[3] 50:6F:9A
+link bandwidth = 320 MHZ
+Max Rate = 2268 Mbps
+RRM capability = 0x0
+Frequency Bands Supported: 2.4G 5G 6G
+eml capabilities : 0x0
+#

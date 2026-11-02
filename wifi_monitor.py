@@ -17,27 +17,11 @@ import argparse, csv, json, os, random, re, shlex, socket, subprocess, sys, thre
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import discovery, planner
+from transport import Runner, SerialRunner, UbusHttpRunner
 from urllib.parse import urlparse, parse_qs
 from advisor import advise, advise_radio, resolve_type, norm_type, PROFILES
 
-# ----------------------------------------------------------------------------- command runner
-class Runner:
-    def __init__(self, host=None, user="root", port=22):
-        self.host, self.user, self.port = host, user, port
-
-    def run(self, cmd, timeout=15):
-        if self.host:
-            argv = ["ssh", "-p", str(self.port), "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
-                    f"{self.user}@{self.host}", cmd]
-        else:
-            argv = ["sh", "-c", cmd]
-        try:
-            p = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
-            return p.stdout
-        except Exception as e:
-            sys.stderr.write(f"[warn] `{cmd}` failed: {e}\n")
-            return ""
-
+# ----------------------------------------------------------------------------- command runner (see transport.py)
 # ----------------------------------------------------------------------------- parsers (pure, testable)
 def band_of(freq):
     return "2.4G" if freq < 3000 else ("5G" if freq < 5925 else "6G")
@@ -140,21 +124,50 @@ def parse_conntrack(text):
                       "up": int(o["bytes"]), "down": int(r["bytes"])})
     return flows
 
+def _kbps(pat, text):
+    m = re.search(pat, text)
+    return int(m.group(1)) / 1000 if m else None
+
 def parse_wl_sta_info(text):
+    """One `wl sta_info <mac>` block. Prefers the *median* rates: 'rate of last rx pkt' is often a 6 Mbps legacy
+    control/null frame on an idle client (seen on real hardware), which is not the client's real uplink rate."""
     d = {}
-    m = re.search(r"rate of last tx pkt:\s*(\d+) kbps", text)
-    if m: d["ap_tx_mbps"] = int(m.group(1)) / 1000
-    m = re.search(r"rate of last rx pkt:\s*(\d+) kbps", text)
-    if m: d["sta_tx_mbps"] = int(m.group(1)) / 1000
+    last_tx = _kbps(r"rate of last tx pkt:\s*(\d+) kbps", text); last_rx = _kbps(r"rate of last rx pkt:\s*(\d+) kbps", text)
+    med_tx = _kbps(r"median tx rate:\s*(\d+) kbps", text); med_rx = _kbps(r"median rx rate:\s*(\d+) kbps", text)
+    d["ap_tx_mbps"] = med_tx if med_tx else last_tx
+    d["sta_tx_mbps"] = med_rx if med_rx else last_rx
+    d = {k: v for k, v in d.items() if v is not None}
     m = re.search(r"smoothed rssi:\s*(-?\d+)", text) or re.search(r"\brssi:\s*(-?\d+)", text)
     if m: d["rssi"] = int(m.group(1))
-    m = re.search(r"tx total bytes:\s*(\d+)", text)
-    if m: d["tx_bytes"] = int(m.group(1))
-    m = re.search(r"rx data bytes:\s*(\d+)", text)
-    if m: d["rx_bytes"] = int(m.group(1))
+    m = re.search(r"per antenna noise floor:\s*(-\d+)", text)
+    if m: d["noise_dbm"] = int(m.group(1))
+    for key, pat in (("tx_bytes", r"tx total bytes:\s*(\d+)"), ("rx_bytes", r"rx data bytes:\s*(\d+)"),
+                     ("tx_packets", r"tx total pkts sent:\s*(\d+)|tx total pkts:\s*(\d+)"), ("tx_retries", r"tx pkts retries:\s*(\d+)"),
+                     ("tx_failed", r"tx failures:\s*(\d+)"), ("connected_s", r"in network\s+(\d+)\s+seconds")):
+        m = re.search(pat, text)
+        if m: d[key] = int(next(g for g in m.groups() if g))
     m = re.search(r"idle\s+(\d+)\s+seconds", text)
     if m: d["inactive_ms"] = int(m.group(1)) * 1000
+    m = re.search(r"chanspec\s+(\S+)", text)
+    if m: d["chanspec"] = m.group(1)
+    m = re.search(r"link bandwidth = (\d+)", text)
+    if m: d["width_mhz"] = int(m.group(1))
     return d
+
+def parse_wl_sta_info_all(text):
+    """`wl sta_info all` -> list of station dicts (one serial round-trip instead of one per client)."""
+    out = []
+    parts = re.split(r"\[VER \d+\]\s+STA\s+([0-9a-fA-F:]{17}):", text)
+    for i in range(1, len(parts) - 1, 2):
+        d = parse_wl_sta_info(parts[i + 1]); d["mac"] = parts[i].lower(); out.append(d)
+    return out
+
+def parse_wl_chanspec(text):
+    """'6g101/320-2 (0x7043)' | '36/80 (0xe02a)' | '11l (0x1b0b)' -> (band, channel, width_mhz|None)"""
+    m = re.search(r"(?:^|\s)(?:(\d)g)?(\d+)(?:/(\d+))?", text.strip())
+    if not m: return None
+    ch = int(m.group(2))
+    return ("6G" if m.group(1) == "6" else ("2.4G" if ch <= 14 else "5G")), ch, int(m.group(3)) if m.group(3) else None
 
 def parse_wl_chanim(text):
     lines = [l.split() for l in text.splitlines() if l.strip()]
@@ -202,8 +215,11 @@ def classify(proto, dport, up_bps, down_bps, iot_client):
 class Backend:
     def __init__(self, runner, ifaces=None):
         self.r, self.ifaces = runner, ifaces
+    max_flows = 2000      # cap lines read from conntrack (slow serial / ubus size limits); 0 = skip traffic classification
     def flows(self):
-        txt = self.r.run("cat /proc/net/nf_conntrack 2>/dev/null || conntrack -L -o extended 2>/dev/null")
+        if not self.max_flows: return []
+        n = int(self.max_flows)
+        txt = self.r.run(f"head -n {n} /proc/net/nf_conntrack 2>/dev/null || conntrack -L -o extended 2>/dev/null | head -n {n}", timeout=30)
         return parse_conntrack(txt)
     def ip_to_mac(self): return parse_neigh(self.r.run("ip neigh"))
     def hostnames(self):
@@ -220,15 +236,20 @@ class WlBackend(Backend):
     def radios(self):
         out = []
         for i in self.ifaces or []:
-            m = re.search(r"current mac channel\s+(\d+)", self.r.run(f"wl -i {shlex.quote(i)} channel"))
-            ch = int(m.group(1)) if m else 0
-            out.append({"iface": i, "channel": ch, "band": "2.4G" if 0 < ch <= 14 else "5G"})
+            q = shlex.quote(i)
+            cs = parse_wl_chanspec(self.r.run(f"wl -i {q} chanspec"))
+            if cs: band, ch, width = cs
+            else:
+                m = re.search(r"current mac channel\s+(\d+)", self.r.run(f"wl -i {q} channel"))
+                ch = int(m.group(1)) if m else 0; band = "2.4G" if 0 < ch <= 14 else "5G"; width = None
+            out.append({"iface": i, "channel": ch, "band": band, "width_mhz": width})
         return out
     def stations(self, iface):
-        out = []
-        for mac in re.findall(r"([0-9a-f:]{17})", self.r.run(f"wl -i {shlex.quote(iface)} assoclist"), re.I):
-            d = parse_wl_sta_info(self.r.run(f"wl -i {shlex.quote(iface)} sta_info {mac}")); d["mac"] = mac.lower()
-            out.append(d)
+        q = shlex.quote(iface)
+        out = parse_wl_sta_info_all(self.r.run(f"wl -i {q} sta_info all", timeout=30))
+        if out: return out
+        for mac in re.findall(r"([0-9a-f:]{17})", self.r.run(f"wl -i {q} assoclist"), re.I):   # older firmware: no 'sta_info all'
+            d = parse_wl_sta_info(self.r.run(f"wl -i {q} sta_info {mac}")); d["mac"] = mac.lower(); out.append(d)
         return out
     def survey(self, iface): return parse_wl_chanim(self.r.run(f"wl -i {shlex.quote(iface)} chanim_stats"))
 
@@ -563,7 +584,16 @@ def serve(mon, bind, port):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--backend", choices=BACKENDS, default="iw")
-    ap.add_argument("--host", help="AP address for SSH (omit to run locally on the AP)")
+    ap.add_argument("--transport", choices=["ssh", "serial", "ubus"], default="ssh",
+                    help="how to reach the AP: ssh (default), serial console, or ubus-over-HTTP web API (OpenWrt/prplOS)")
+    ap.add_argument("--host", help="AP address for ssh (omit to run locally on the AP)")
+    ap.add_argument("--serial-port", help="e.g. /dev/cu.usbserial-0001 (macOS) - for --transport serial")
+    ap.add_argument("--baud", type=int, default=115200)
+    ap.add_argument("--serial-user", help="console login name, if the console shows a login prompt")
+    ap.add_argument("--http-url", help="e.g. http://192.168.1.1 - for --transport ubus")
+    ap.add_argument("--http-user", default="root")
+    ap.add_argument("--password", help="serial/web password (or set env WIFI_PASS; prompted if omitted)")
+    ap.add_argument("--max-flows", type=int, help="max conntrack lines per poll (default 2000 ssh / 400 ubus / 300 serial; 0 = no app classification)")
     ap.add_argument("--user", default="root"); ap.add_argument("--ssh-port", type=int, default=22)
     ap.add_argument("--ifaces", help="comma list of AP interfaces (required for wl/qca; optional filter for iw)")
     ap.add_argument("--interval", type=float, default=5.0)
@@ -577,13 +607,28 @@ def main():
     ap.add_argument("--once", action="store_true", help="two polls, print table, exit (no web server)")
     ap.add_argument("--console", action="store_true", help="print table every interval as well")
     a = ap.parse_args()
-    args_ = (Runner(a.host, a.user, a.ssh_port), a.ifaces.split(",") if a.ifaces else None)
+    if a.transport != "ssh" and a.backend == "local": ap.error("--backend local doesn't use --transport")
+    pw = a.password if a.password is not None else os.environ.get("WIFI_PASS")
+    if a.transport == "serial":
+        if not a.serial_port: ap.error("--transport serial needs --serial-port")
+        if pw is None and a.serial_user:
+            import getpass; pw = getpass.getpass("Console password: ")
+        runner = SerialRunner(a.serial_port, a.baud, a.serial_user, pw)
+    elif a.transport == "ubus":
+        if not a.http_url: ap.error("--transport ubus needs --http-url")
+        if pw is None:
+            import getpass; pw = getpass.getpass(f"Web password for {a.http_user}: ")
+        runner = UbusHttpRunner(a.http_url, a.http_user, pw)
+    else:
+        runner = Runner(a.host, a.user, a.ssh_port)
+    args_ = (runner, a.ifaces.split(",") if a.ifaces else None)
     be = LocalBackend(*args_, subnet=a.subnet) if a.backend == "local" else BACKENDS[a.backend](*args_)
     types = json.load(open(a.clients_file)) if a.clients_file else {}
     for kv in a.client:
         k, _, v = kv.partition("=")
         if not norm_type(v): ap.error(f"unknown client type '{v}' in --client {kv}; use one of {', '.join(PROFILES)}")
         types[k] = v
+    be.max_flows = a.max_flows if a.max_flows is not None else {"serial": 300, "ubus": 400}.get(a.transport, 2000)
     mon = Monitor(be, a.interval, a.log_dir, types, a.band_offset)
     if a.once:
         mon.poll(); time.sleep(a.interval); mon.poll(); print_table(mon.state); print_insights(mon.state); return
