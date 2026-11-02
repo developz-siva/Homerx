@@ -81,6 +81,13 @@ def make_server(agent, bind="0.0.0.0", port=8099):
         def do_GET(self):
             if agent.token and self.headers.get("X-Token") != agent.token: self.send_error(401); return
             u = urlparse(self.path); qs = parse_qs(u.query)
+            if u.path in ("/", "/index.html"):
+                st = agent.status(); page = ("<!doctype html><meta charset=utf-8><title>iperf agent</title><body style='font:16px system-ui;margin:2em'><h3>iperf3 agent is running</h3>"
+                    f"<p>State: <b>{st['state']}</b> &middot; iperf3 port {st['iperf_port']} &middot; tests recorded: {st['last_id']}</p>"
+                    + (f"<p style='color:#b00'>{st['last_error']}</p>" if st['last_error'] else "") +
+                    f"<p>On the Wi-Fi client run: <code>iperf3 -c {st['server_ip']} -p {st['iperf_port']}</code><br>Dashboard option: <code>--iperf-server http://{st['server_ip']}:{port}</code></p>"
+                    "<p><a href=/status>/status</a> &middot; <a href=/results>/results</a></p>").encode()
+                self.send_response(200); self.send_header("Content-Type", "text/html; charset=utf-8"); self.send_header("Content-Length", str(len(page))); self.end_headers(); self.wfile.write(page); return
             if u.path == "/status": body = agent.status()
             elif u.path == "/results":
                 try: after = int(qs.get("after", ["0"])[0])
