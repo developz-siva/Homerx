@@ -85,6 +85,30 @@ Notes
   or tell me the model and I can write an adapter.
 - --backend local needs no transport (Mac only).
 
+## Device memory monitor (telnet / ssh), 24 / 48 / 72 h graphs and PDF
+`memwatch.py` watches the memory of the device itself (router / gateway / AP) for days. Every `--interval` seconds (default 60) it logs
+in and reads `/proc/meminfo`, `/proc/loadavg`, `/proc/uptime`, per-process RSS (`/proc/<pid>/status`) and a `top -b -n 1` snapshot, and
+appends everything to CSV files in `memlogs/` (so it survives restarts and keeps 7 days).
+
+    py memwatch.py --host 192.168.1.1 --user root --password secret      # telnet is the default; page at http://127.0.0.1:8090/mem
+    py memwatch.py --host 192.168.1.1 --transport ssh --user root
+    py memwatch.py --pdf report.pdf --hours 72                           # PDF from the stored history, no device needed
+    py memwatch.py --host 192.168.1.1 --once                             # one sample, print, exit
+
+Or inside the Wi-Fi dashboard, one tool for both: add `--mem-host 192.168.1.1 --mem-user root --mem-password secret` (also
+`--mem-transport`, `--mem-port`, `--mem-interval`, `--mem-dir`, `--mem-label`) to the usual `wifi_monitor.py` command. The dashboard
+header then has a **Device memory** link (`/mem`). The password may also come from the `MEM_PASS` environment variable, or is asked for.
+
+- **Page:** buttons for **24 h / 48 h / 72 h**; graphs of memory in use vs available, page cache / buffers / slab / shared, and the largest
+  processes by RSS (hover for values), a summary, the latest `top`, and a **Download PDF** button.
+- **PDF:** summary, findings, the same graphs, a per-process table and the raw `top` snapshot. Written without any library
+  (no matplotlib / reportlab), so it works on a plain Windows Python.
+- **Findings:** in-use memory growing (MB/hour and hours until the free memory is gone), the process or kernel slab that is growing, low
+  available memory, swap use, device reboots (trends restart after a reboot) and gaps in the data. Leak detection needs about 2 h of history.
+- **Telnet:** a built-in client (no `telnetlib`, which Python 3.13 removed) that handles an optional login and reconnects if the device
+  drops the connection. Needs a root shell on the device; busybox `grep`, `cat` and `top` are enough. The telnet password travels in clear text:
+  use it on a trusted LAN only (use `--transport ssh` otherwise).
+
 ## Throughput tests: iperf3 and speedtest (in the Traffic planner)
 Pick **Throughput test - iperf3 (measured)** or **Internet speed test - speedtest** in the Traffic dropdown. The card first
 shows the client's current link (RSSI, PHY rates, retries, radio busy %), then a **Run test** button measures the real thing while the

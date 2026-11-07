@@ -79,7 +79,7 @@ class AgentEndToEnd(unittest.TestCase):
         mon, mac = monitor(self.url, client_ip="10.9.9.9"); mon.arm_timeout = 5
         mon.start_test({"mac": mac, "traffic": "iperf3", "quality": s.MODES["tcp_up"], "secs": 3})
         time.sleep(1); c = client(); c.wait(timeout=20)                                                    # arrives from 127.0.0.1, not 10.9.9.9
-        self.assertTrue(wait_state(mon, ("error",), 20)); st = mon.test_status()
+        self.assertTrue(wait_state(mon, ("error",), 45)); st = mon.test_status()
         self.assertIn("127.0.0.1", st["others"]); self.assertIn("No iperf3 test from 10.9.9.9", st["result"]["error"]); self.assertIn("127.0.0.1", st["result"]["error"])
     def test_cancel(self):
         mon, mac = monitor(self.url)

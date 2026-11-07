@@ -16,7 +16,7 @@ Traffic per client + app/QoS class comes from conntrack byte counters (needs nf_
 import argparse, csv, json, os, random, re, shlex, socket, subprocess, sys, threading, time
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-import discovery, planner, speedtools
+import discovery, memwatch, planner, speedtools
 from transport import Runner, SerialRunner, UbusHttpRunner
 from urllib.parse import urlparse, parse_qs
 from advisor import advise, advise_radio, resolve_type, norm_type, PROFILES
@@ -347,7 +347,8 @@ class Monitor:
         self.prev_surv, self.prev_flow, self.prev_sta = {}, None, {}
         self.last_t = None
         self.test, self.iperf_from, self.allow_remote_tests, self.iperf_port = None, "host", False, 5201
-        self.iperf_server, self.iperf_token, self.iperf_server_ip, self.arm_timeout = None, None, None, 180      # server-PC mode: base URL of iperf_agent.py
+        self.iperf_server, self.iperf_token, self.iperf_server_ip, self.arm_timeout = None, None, None, 180
+        self.mem = None                                         # memwatch.MemCollector when --mem-host is given      # server-PC mode: base URL of iperf_agent.py
         self.state = {"ts": 0, "radios": [], "clients": [], "summary": {}}
         self.lock = threading.Lock()
 
@@ -700,7 +701,7 @@ th{color:var(--mut);font-weight:500}.mut{color:var(--mut)}.tag{display:inline-bl
 .tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin:10px 0}.tile{border:1px solid var(--line);border-radius:8px;padding:10px}
 .tile b{display:block;font-size:20px}.tile span{color:var(--mut);font-size:12px}
 .v{display:inline-block;padding:3px 10px;border-radius:12px;font-weight:600;color:#fff}.v.good{background:#12b76a}.v.marginal{background:#f79009}.v.poor{background:#d92d20}.v.unknown{background:#667085}</style></head><body>
-<h1>Wi-Fi Monitor <span class=mut id=ts></span></h1>
+<h1>Wi-Fi Monitor <span class=mut id=ts></span> <a href="/mem" style="font-size:13px;font-weight:400;margin-left:12px">Device memory &rarr;</a></h1>
 <div class=card><h2>Traffic planner</h2>
 <div class=ctl><label>Client<select id=pc></select></label><label>Traffic<select id=pt></select></label>
 <label>Quality<select id=pq></select></label><label>Simultaneous streams<input id=pn type=number min=1 max=20 value=1 style="min-width:80px"></label></div>
@@ -783,6 +784,11 @@ def serve(mon, bind, port):
                 try: body = json.dumps(mon.plan(qs.get("mac", ""), qs.get("traffic", "video"), qs.get("quality"), qs.get("n", 1))).encode()
                 except Exception as e: body = json.dumps({"error": str(e)}).encode()
                 ct = "application/json"
+            elif u.path.startswith(("/mem", "/api/mem")) and memwatch.handle_get(mon.mem, u.path, qs):
+                code, ct, body, hdr = memwatch.handle_get(mon.mem, u.path, qs)
+                self.send_response(code); self.send_header("Content-Type", ct); self.send_header("Content-Length", str(len(body)))
+                for k, v in hdr.items(): self.send_header(k, v)
+                self.end_headers(); self.wfile.write(body); return
             elif u.path == "/api/config": body, ct = json.dumps(mon.config()).encode(), "application/json"
             elif u.path == "/api/test/pending": body, ct = json.dumps(mon.pending_for(self.client_address[0])).encode(), "application/json"
             elif u.path == "/api/test/status": body, ct = json.dumps(mon.test_status()).encode(), "application/json"
@@ -837,6 +843,7 @@ def main():
     ap.add_argument("--iperf-token", help="shared secret, if iperf_agent.py was started with --token")
     ap.add_argument("--iperf-server-ip", help="IP the clients should connect to, if different from what the agent reports")
     ap.add_argument("--allow-remote-tests", action="store_true", help="let other machines on the LAN start tests (default: only this machine)")
+    memwatch.add_cli_args(ap, "mem-")
     ap.add_argument("--once", action="store_true", help="two polls, print table, exit (no web server)")
     ap.add_argument("--console", action="store_true", help="print table every interval as well")
     a = ap.parse_args()
@@ -865,6 +872,9 @@ def main():
     mon = Monitor(be, a.interval, a.log_dir, types, a.band_offset)
     mon.iperf_from, mon.allow_remote_tests, mon.iperf_port = a.iperf_from, a.allow_remote_tests, a.iperf_port
     mon.iperf_server, mon.iperf_token, mon.iperf_server_ip = a.iperf_server, a.iperf_token, a.iperf_server_ip
+    if a.mem_host or a.mem_transport == "local":
+        mon.mem = memwatch.collector_from_args(a, "mem-"); threading.Thread(target=mon.mem.loop, daemon=True).start()
+        print(f"Memory collector: {a.mem_host} via {a.mem_transport} every {a.mem_interval}s -> {a.mem_dir}/   page: http://{a.bind}:{a.port}/mem")
     if a.once:
         mon.poll(); time.sleep(a.interval); mon.poll(); print_table(mon.state); print_insights(mon.state); return
     mon.poll()
