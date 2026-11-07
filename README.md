@@ -147,6 +147,10 @@ monitor samples that client's RSSI, PHY rates, Tx retries and radio busy % about
   - **Ubuntu / Linux / macOS:** `sudo apt install iperf3 python3`, then `python3 iperf_client.py --dashboard http://<dashboard PC>:8080`.
   - **Android:** install Termux, then `pkg install python iperf3` and run the same script. Keep Termux in the foreground (or acquire its wakelock).
   - **iPhone/iPad:** iOS cannot run background scripts, so use any iperf3 app and type the command the dashboard shows.
+- **iperf3 not on PATH (Windows):** the dashboard, `iperf_agent.py` and `iperf_client.py` look for iperf3 on PATH, in `IPERF3_PATH`, next to the
+  scripts, in the current folder and in the usual places (`C:\\iperf3`, `Downloads\\iperf*`, ...). Otherwise point at it with
+  `--iperf-bin "C:\\path\\to\\iperf3.exe"` (the file or its folder) on whichever script reports it missing. The official Windows build also needs
+  its `cygwin1.dll` in the same folder as `iperf3.exe`. `iperf_client.py` prints the iperf3 it found when it starts.
 - **Several networks (e.g. a management IP besides the LAN IP): choose the source address.** iperf3's `-B` pins which local address a test
   uses, so traffic leaves by the right network instead of whatever the routing table prefers.
   - *Server PC:* `py iperf_agent.py --iperf-bind 192.168.1.3` listens only on that address (`iperf3 -s -B`); the page and the client

@@ -1,5 +1,5 @@
 """Server-PC mode: iperf_agent.py on a LAN PC + the selected client running `iperf3 -c <PC>`. Real-iperf3 tests skip when absent."""
-import json, os, shutil, subprocess, sys, threading, time, unittest
+import json, os, shutil, subprocess, sys, tempfile, threading, time, unittest
 import iperf_agent as ag, speedtools as s, wifi_monitor as w
 
 FX = os.path.join(os.path.dirname(__file__), "fixtures")
@@ -102,7 +102,7 @@ class AgentProblems(unittest.TestCase):
         finally: srv.shutdown()
     def test_missing_iperf3_reported(self):
         a = ag.Agent(5742, iperf_bin="definitely-not-iperf3"); threading.Thread(target=a.run_forever, daemon=True).start(); time.sleep(0.5)
-        self.assertEqual(a.status()["state"], "error"); self.assertIn("not installed", a.status()["last_error"])
+        self.assertEqual(a.status()["state"], "error"); self.assertIn("not found", a.status()["last_error"])
 
 if __name__ == "__main__": unittest.main()
 
@@ -191,3 +191,36 @@ class SourceBindingReal(unittest.TestCase):
         srv = subprocess.Popen(["iperf3", "-s", "-1", "-p", "5750", "-B", "127.0.0.1"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); time.sleep(0.8)
         try: r = s.run_iperf3("127.0.0.1", "tcp_down", 2, 1, 1, port=5750, bind="127.0.0.1"); self.assertTrue(r["ok"], r); self.assertGreater(r["mbps"], 100)
         finally: srv.kill()
+
+class FindIperf3(unittest.TestCase):
+    def _fake(self, d, name="iperf3"):
+        p = os.path.join(d, name); open(p, "w").write("#!/bin/sh\necho fake\n"); os.chmod(p, 0o755); return p
+    def test_explicit_file_and_folder(self):
+        d = tempfile.mkdtemp(); p = self._fake(d)
+        self.assertEqual(s.find_iperf3(p), p); self.assertEqual(s.find_iperf3(d), p); self.assertIsNone(s.find_iperf3(os.path.join(d, "nope")))
+        for mod in (ag, ic): self.assertEqual(mod.find_iperf3(d), p)                                     # the agent and the client carry their own copy
+    def test_env_and_current_folder(self):
+        d = tempfile.mkdtemp(); p = self._fake(d); old_env, old_cwd, old_path = os.environ.get("IPERF3_PATH"), os.getcwd(), os.environ["PATH"]
+        try:
+            os.environ["PATH"] = "/nonexistent"; os.environ["IPERF3_PATH"] = d; self.assertEqual(s.find_iperf3(), p)
+            os.environ.pop("IPERF3_PATH"); os.chdir(d); self.assertEqual(s.find_iperf3(), p)
+        finally:
+            os.chdir(old_cwd); os.environ["PATH"] = old_path
+            if old_env is not None: os.environ["IPERF3_PATH"] = old_env
+    def test_not_found_message_tells_what_to_do(self):
+        r = s.run_iperf3("127.0.0.1", "tcp_down", 1, 1, 1, iperf_bin="/definitely/not/here/iperf3")
+        self.assertFalse(r["ok"]); self.assertIn("--iperf-bin", r["error"]); self.assertIn("/definitely/not/here/iperf3", r["error"])
+
+@unittest.skipUnless(shutil.which("iperf3"), "iperf3 binary not on PATH")
+class CopiedBinary(unittest.TestCase):
+    def test_everything_works_with_iperf3_outside_path(self):
+        real = shutil.which("iperf3"); d = tempfile.mkdtemp(); exe = os.path.join(d, "iperf3"); shutil.copy(real, exe); os.chmod(exe, 0o755)
+        if subprocess.run([exe, "--version"], capture_output=True).returncode != 0: self.skipTest("binary is not relocatable here")
+        env = dict(os.environ, PATH="/usr/bin:/bin")                                                      # a PATH without iperf3
+        a = ag.Agent(5752, iperf_bin=d); threading.Thread(target=a.run_forever, daemon=True).start(); time.sleep(1.3)
+        self.assertEqual(a.status()["state"], "listening", a.status())
+        r = s.run_iperf3("127.0.0.1", "tcp_up", 2, 1, 1, port=5752, iperf_bin=exe); self.assertTrue(r["ok"], r)                 # dashboard-run test, explicit path
+        for _ in range(20):
+            if a.status()["last_id"]: break
+            time.sleep(0.3)
+        self.assertEqual(a.status()["last_id"], 1)

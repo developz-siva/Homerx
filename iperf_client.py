@@ -15,6 +15,35 @@ Needs iperf3 on this device (use --iperf-bin if it is not on PATH). Python stand
 """
 import argparse, ipaddress, json, shutil, subprocess, sys, time, urllib.request
 
+def find_iperf3(explicit=None):
+    """Locate iperf3: an explicit file or folder, PATH, $IPERF3_PATH, beside this script, the current folder, then usual install places.
+    Returns a full path, or None."""
+    import glob, os
+    names = ["iperf3.exe", "iperf3"] if os.name == "nt" else ["iperf3"]
+    def pick(d):
+        for n in names:
+            p = os.path.join(d, n)
+            if os.path.isfile(p): return p
+        return None
+    if explicit and explicit != "iperf3":
+        explicit = os.path.expandvars(os.path.expanduser(explicit))
+        if os.path.isdir(explicit): return pick(explicit)
+        if os.path.isfile(explicit): return explicit
+        w = shutil.which(explicit)
+        return w
+    w = shutil.which("iperf3")
+    if w: return w
+    home = os.path.expanduser("~")
+    dirs = [os.environ.get("IPERF3_PATH", ""), os.path.dirname(os.path.abspath(__file__)), os.getcwd(), "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin",
+            r"C:\iperf3", r"C:\iperf", r"C:\tools\iperf3", r"C:\Program Files\iperf3", r"C:\Program Files (x86)\iperf3", os.path.join(home, "iperf3")]
+    for pat in (os.path.join(home, "Downloads", "iperf*"), os.path.join(home, "Desktop", "iperf*"), r"C:\iperf*", os.path.join(home, "iperf*")): dirs += glob.glob(pat)
+    for d in dirs:
+        if d and os.path.isdir(d):
+            p = pick(d) or pick(os.path.join(d, "bin"))
+            if p: return p
+        elif d and os.path.isfile(d): return d
+    return None
+
 def build_argv(job, iperf_bin="iperf3", bind="auto"):
     """Build the iperf3 command from the dashboard's job. Every field is validated; nothing goes through a shell."""
     ipaddress.ip_address(job["server_ip"])
@@ -40,7 +69,9 @@ def main():
     ap.add_argument("--no-bind", action="store_true", help="never add -B (ignore the address the dashboard suggests)")
     ap.add_argument("--poll", type=float, default=1.0, help="seconds between checks (default 1)")
     a = ap.parse_args()
-    if not shutil.which(a.iperf_bin): sys.exit(f"iperf3 not found ({a.iperf_bin}). Install it or pass --iperf-bin.")
+    exe = find_iperf3(a.iperf_bin)
+    if not exe: sys.exit("iperf3 was not found" + (f" at {a.iperf_bin}" if a.iperf_bin != "iperf3" else "") + ". Searched PATH, this folder and the usual install folders. Pass --iperf-bin \"C:\\path\\to\\iperf3.exe\" (file or folder) or install it.")
+    print(f"using {exe}", flush=True)
     url = a.dashboard.rstrip("/") + "/api/test/pending" + (f"?ip={a.bind}" if a.bind else "")
     if a.bind: ipaddress.ip_address(a.bind)
     print(f"Watching {a.dashboard} for tests armed for this device. Ctrl-C to stop.", flush=True)
@@ -49,7 +80,7 @@ def main():
         try:
             job = fetch(url); warned = False
             if job.get("pending"):
-                argv = build_argv(job, a.iperf_bin, None if a.no_bind else (a.bind or "auto"))
+                argv = build_argv(job, exe, None if a.no_bind else (a.bind or "auto"))
                 print(time.strftime("%H:%M:%S"), "running:", " ".join(argv), flush=True)
                 subprocess.run(argv)
                 print(time.strftime("%H:%M:%S"), "done; result is in the dashboard", flush=True)

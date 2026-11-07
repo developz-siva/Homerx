@@ -17,6 +17,35 @@ import argparse, collections, json, shutil, socket, subprocess, sys, threading, 
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
+def find_iperf3(explicit=None):
+    """Locate iperf3: an explicit file or folder, PATH, $IPERF3_PATH, beside this script, the current folder, then usual install places.
+    Returns a full path, or None."""
+    import glob, os
+    names = ["iperf3.exe", "iperf3"] if os.name == "nt" else ["iperf3"]
+    def pick(d):
+        for n in names:
+            p = os.path.join(d, n)
+            if os.path.isfile(p): return p
+        return None
+    if explicit and explicit != "iperf3":
+        explicit = os.path.expandvars(os.path.expanduser(explicit))
+        if os.path.isdir(explicit): return pick(explicit)
+        if os.path.isfile(explicit): return explicit
+        w = shutil.which(explicit)
+        return w
+    w = shutil.which("iperf3")
+    if w: return w
+    home = os.path.expanduser("~")
+    dirs = [os.environ.get("IPERF3_PATH", ""), os.path.dirname(os.path.abspath(__file__)), os.getcwd(), "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin",
+            r"C:\iperf3", r"C:\iperf", r"C:\tools\iperf3", r"C:\Program Files\iperf3", r"C:\Program Files (x86)\iperf3", os.path.join(home, "iperf3")]
+    for pat in (os.path.join(home, "Downloads", "iperf*"), os.path.join(home, "Desktop", "iperf*"), r"C:\iperf*", os.path.join(home, "iperf*")): dirs += glob.glob(pat)
+    for d in dirs:
+        if d and os.path.isdir(d):
+            p = pick(d) or pick(os.path.join(d, "bin"))
+            if p: return p
+        elif d and os.path.isfile(d): return d
+    return None
+
 def lan_ip():
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try: s.connect(("10.255.255.255", 1)); return s.getsockname()[0]       # picks the LAN interface; sends nothing
@@ -35,14 +64,15 @@ class Agent:
             self.results.append({"id": self.next_id, "finished": time.monotonic(), "raw": raw}); self.next_id += 1
 
     def run_forever(self):
-        if not shutil.which(self.iperf_bin):
-            self.state, self.last_error = "error", "iperf3 is not installed on this PC (Windows: https://iperf.fr/iperf-download.php, macOS: brew install iperf3, Linux: apt install iperf3)"
-            sys.stderr.write(self.last_error + "\n")
         while True:
-            if not shutil.which(self.iperf_bin): time.sleep(5); continue
+            exe = find_iperf3(self.iperf_bin)
+            if not exe:
+                self.state, self.last_error = "error", ("iperf3 was not found" + (f" at {self.iperf_bin}" if self.iperf_bin != "iperf3" else "") + ". Searched PATH, this folder and the usual install folders. "
+                    "Start the agent with --iperf-bin \"C:\\path\\to\\iperf3.exe\" (file or folder), or install it (Windows: https://iperf.fr/iperf-download.php, macOS: brew install iperf3, Linux: apt install iperf3).")
+                sys.stderr.write(self.last_error + "\n"); time.sleep(5); continue
             self.state = "listening"
             try:
-                p = subprocess.Popen([self.iperf_bin, "-s", "-1", "-J", "-p", str(self.iperf_port)] + (["-B", self.bind] if self.bind else []), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                p = subprocess.Popen([exe, "-s", "-1", "-J", "-p", str(self.iperf_port)] + (["-B", self.bind] if self.bind else []), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
                 out, err = p.communicate()
             except Exception as e:
                 self.state, self.last_error = "error", str(e); time.sleep(3); continue
@@ -102,7 +132,7 @@ def make_server(agent, bind="0.0.0.0", port=8099):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--iperf-port", type=int, default=5201, help="port the iperf3 server listens on (default 5201)")
-    ap.add_argument("--iperf-bin", default="iperf3", help='path to iperf3 if it is not on PATH, e.g. --iperf-bin "C:\\tools\\iperf3\\iperf3.exe"')
+    ap.add_argument("--iperf-bin", default="iperf3", help='iperf3 file or folder if it is not on PATH, e.g. --iperf-bin "C:\\tools\\iperf3"')
     ap.add_argument("--iperf-bind", metavar="IP", help="listen for iperf3 only on this local address (iperf3 -s -B); use it when this PC has several networks")
     ap.add_argument("--http-port", type=int, default=8099, help="port the dashboard reads results from (default 8099)")
     ap.add_argument("--bind", default="0.0.0.0", help="HTTP bind address (default all interfaces so the dashboard PC can reach it)")

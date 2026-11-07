@@ -347,7 +347,7 @@ class Monitor:
         self.prev_surv, self.prev_flow, self.prev_sta = {}, None, {}
         self.last_t = None
         self.test, self.iperf_from, self.allow_remote_tests, self.iperf_port = None, "host", False, 5201
-        self.iperf_src, self.bind_client = None, True      # iperf_src: -B for tests run from the dashboard; bind_client: put -B <client IP> in the client command
+        self.iperf_src, self.bind_client, self.iperf_bin = None, True, None      # iperf_src: -B for tests run from the dashboard; bind_client: put -B <client IP> in the client command
         self.iperf_server, self.iperf_token, self.iperf_server_ip, self.arm_timeout = None, None, None, 180
         self.mem = None                                         # memwatch.MemCollector when --mem-host is given      # server-PC mode: base URL of iperf_agent.py
         self.state = {"ts": 0, "radios": [], "clients": [], "summary": {}}
@@ -564,7 +564,7 @@ class Monitor:
         try:
             if t["tool"] == "iperf3":
                 res = speedtools.run_iperf3(t["ip"], t["mode"], t["secs"], t["streams"], t["rate"],
-                                            runner=self.be.r if self.iperf_from == "ap" else None, port=self.iperf_port, bind=self.iperf_src)
+                                            runner=self.be.r if self.iperf_from == "ap" else None, port=self.iperf_port, bind=self.iperf_src, iperf_bin=self.iperf_bin)
             else:
                 res = speedtools.run_speedtest()
         except Exception as e:
@@ -848,6 +848,7 @@ def main():
     ap.add_argument("--iperf-from", choices=["host", "ap"], default="host",
                     help="where iperf3 runs for the dashboard's throughput test: this machine (default) or on the AP (AP needs iperf3 installed)")
     ap.add_argument("--iperf-src", metavar="IP", help="source address (iperf3 -B) for tests the dashboard runs itself; use it when this PC has several networks")
+    ap.add_argument("--iperf-bin", metavar="PATH", help="iperf3 executable (or its folder) when it is not on PATH, for tests the dashboard runs itself")
     ap.add_argument("--no-client-bind", action="store_true", help="server-PC mode: do not add -B <client IP> to the client command")
     ap.add_argument("--iperf-port", type=int, default=5201, help="iperf3 server port on the client (default 5201)")
     ap.add_argument("--iperf-server", metavar="URL", help="server-PC mode: URL of iperf_agent.py on a LAN PC (e.g. http://192.168.1.50:8099). "
@@ -883,7 +884,7 @@ def main():
     be.max_flows = a.max_flows if a.max_flows is not None else {"serial": 300, "ubus": 400}.get(a.transport, 2000)
     mon = Monitor(be, a.interval, a.log_dir, types, a.band_offset)
     mon.iperf_from, mon.allow_remote_tests, mon.iperf_port = a.iperf_from, a.allow_remote_tests, a.iperf_port
-    mon.iperf_src, mon.bind_client = a.iperf_src, not a.no_client_bind
+    mon.iperf_src, mon.bind_client, mon.iperf_bin = a.iperf_src, not a.no_client_bind, a.iperf_bin
     mon.iperf_server, mon.iperf_token, mon.iperf_server_ip = a.iperf_server, a.iperf_token, a.iperf_server_ip
     if a.mem_host or a.mem_transport == "local":
         mon.mem = memwatch.collector_from_args(a, "mem-")
