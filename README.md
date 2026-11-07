@@ -65,6 +65,8 @@ Capacity is a model, not a speed test.
     python3 wifi_monitor.py --backend local                       # MacBook only
     python3 wifi_monitor.py --backend iw --host 192.168.1.1       # with AP data
 
+**Client not in the dropdown?** Type its IP in the "or client IP" box next to it (the box wins over the dropdown). The test still works with the client helper or the shown command; link metrics (RSSI/PHY) appear only if that IP is a client the AP reports.
+
 ## Easiest: start the dashboard and pick the connection in it
     py wifi_monitor.py                       # Windows        python3 wifi_monitor.py   # macOS / Linux
     py wifi_monitor.py --log-dir logs --bind 0.0.0.0     # add --bind 0.0.0.0 if clients run iperf_client.py

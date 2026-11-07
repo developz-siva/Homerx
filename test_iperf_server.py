@@ -100,6 +100,18 @@ class AgentProblems(unittest.TestCase):
             mon, mac = monitor(url, token="sekret"); time.sleep(1.2)
             self.assertEqual(mon.start_test({"mac": mac, "traffic": "iperf3", "quality": s.MODES["tcp_up"], "secs": 3}), {"ok": True}); mon.cancel_test()
         finally: srv.shutdown()
+    def test_client_ip_can_be_typed(self):
+        a, srv, url = start_agent(port=5746)
+        try:
+            mon, mac = monitor(url); time.sleep(1.2)
+            self.assertIn("not a valid", mon.start_test({"ip": "300.1.1.1", "traffic": "iperf3", "secs": 3})["error"])
+            self.assertEqual(mon.start_test({"ip": "10.9.8.7", "traffic": "iperf3", "quality": s.MODES["tcp_up"], "secs": 3}), {"ok": True})
+            self.assertEqual(mon.test["ip"], "10.9.8.7"); self.assertEqual(mon.test["mac"], "ip:10.9.8.7"); self.assertEqual(mon.pending_for("10.9.8.7")["pending"], True); mon.cancel_test()
+            self.assertTrue(wait_state(mon, ("cancelled", "done", "error"), 10))
+            self.assertEqual(mon.start_test({"ip": "127.0.0.1", "traffic": "iperf3", "quality": s.MODES["tcp_up"], "secs": 3}), {"ok": True})
+            self.assertEqual(mon.test["mac"], mac)                      # a typed IP that is in the client list is tied to that client
+            mon.cancel_test()
+        finally: srv.shutdown()
     def test_missing_iperf3_reported(self):
         a = ag.Agent(5742, iperf_bin="definitely-not-iperf3"); threading.Thread(target=a.run_forever, daemon=True).start(); time.sleep(0.5)
         self.assertEqual(a.status()["state"], "error"); self.assertIn("not found", a.status()["last_error"])

@@ -585,6 +585,13 @@ class Monitor:
         except (TypeError, ValueError): return {"error": "Duration, streams and rate must be numbers."}
         secs, streams, rate = max(3, min(secs, 120)), max(1, min(streams, 16)), max(0.1, min(rate, 10000.0))
         client, ip = self._find(st, mac), None
+        typed = str(req.get("ip") or "").strip()
+        if typed and not mac:                                           # the user typed the client's IP instead of picking from the list
+            try: import ipaddress; typed = str(ipaddress.ip_address(typed))
+            except ValueError: return {"error": f"'{typed}' is not a valid IP address."}
+            known = next((c for c in st["clients"] + st.get("lan", []) if typed in (c.get("ips") or [])), None)
+            client = known or {"mac": "ip:" + typed, "ips": [typed], "host": "", "iface": None}
+            mac = client["mac"]
         server = bool(self.iperf_server) and spec["test"] == "iperf3"
         if spec["test"] == "iperf3":
             if not client or not client.get("ips"): return {"error": "No IP is known for that client yet; it must show an IP in the client list."}
@@ -930,7 +937,7 @@ th{color:var(--mut);font-weight:500}.mut{color:var(--mut)}.tag{display:inline-bl
 <span id=cmsg class=mut style="margin-left:10px"></span></div>
 <p class=mut style="margin-bottom:0">Passwords are used for this session only and never saved. Other settings are remembered for next time.</p></div>
 <div class=card><h2>Traffic planner</h2>
-<div class=ctl><label>Client<select id=pc></select></label><label>Traffic<select id=pt></select></label>
+<div class=ctl><label>Client<select id=pc></select></label><label>or client IP<input id=pip placeholder="192.168.1.50" style="min-width:130px"></label><label>Traffic<select id=pt></select></label>
 <label>Quality<select id=pq></select></label><label>Simultaneous streams<input id=pn type=number min=1 max=20 value=1 style="min-width:80px"></label></div>
 <div id=pr class=mut>Select a client and a traffic type.</div>
 <div id=tp style="display:none;margin-top:14px;border-top:1px solid var(--line);padding-top:12px">
@@ -1005,13 +1012,13 @@ h+='</div><div class=mut style="line-height:1.6"><b>QoS:</b> WMM '+esc(r.qos.wmm
 let SRV=false;
 async function boot(){try{CAT=await (await fetch('api/catalog')).json();SRV=(await (await fetch('api/config')).json()).iperf_server}catch(e){return}
 $('pt').innerHTML='<option value="">— select traffic —</option>'+Object.entries(CAT).map(([k,v])=>`<option value="${k}">${esc(v.label)}</option>`).join('');
-$('pt').onchange=()=>{fillQual();testUI();plan()};$('pq').addEventListener('change',testUI);['pc','pq','pn'].forEach(i=>$(i).onchange=plan);$('tb').onclick=runTest;setInterval(tstat,1000)}
+$('pt').onchange=()=>{fillQual();testUI();plan()};$('pq').addEventListener('change',testUI);['pc','pq','pn'].forEach(i=>$(i).onchange=plan);$('pc').addEventListener('change',()=>{if($('pc').value)$('pip').value=''});$('tb').onclick=runTest;setInterval(tstat,1000)}
 function testUI(){const k=$('pt').value,c=CAT&&CAT[k];$('tp').style.display=c&&c.test?'block':'none';if(!c||!c.test)return;const m=c.modes[$('pq').value]||'',ip=c.test==='iperf3';
 $('tdl').style.display=ip?'':'none';$('tsl').style.display=ip?'':'none';$('trl').style.display=(ip&&m.startsWith('udp'))?'':'none';
 $('tn').textContent=ip&&SRV?"Server-PC mode: press Run test, then run the shown iperf3 command on the selected Wi-Fi client. Download = add -R. The result is tied to the client by its IP; link metrics are captured during the run.":ip?"Needs an iperf3 server on the selected client (run: iperf3 -s; phones have iperf3 apps) with port 5201 allowed. Download = host to client, upload = client to host. Link metrics are sampled about every 2 s while the test runs.":"Runs on the machine running this dashboard: it measures that machine's internet speed, not the selected client's."}
-async function runTest(){const mac=$('pc').value,k=$('pt').value;if(!mac||!k){$('tres').textContent='Select a client first.';return}
+async function runTest(){const mac=$('pc').value,ip=$('pip').value.trim(),k=$('pt').value;if((!mac&&!ip)||!k){$('tres').textContent='Select a client, or type its IP.';return}
 if($('tb').dataset.cancel){await fetch('api/test/cancel',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});return}
-let r;try{r=await (await fetch('api/test/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mac,traffic:k,quality:$('pq').value,secs:+$('td').value,streams:+$('tsn').value,rate:+$('tr').value})})).json()}catch(e){$('tres').textContent='Could not start the test.';return}
+let r;try{r=await (await fetch('api/test/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mac:ip?'':mac,ip,traffic:k,quality:$('pq').value,secs:+$('td').value,streams:+$('tsn').value,rate:+$('tr').value})})).json()}catch(e){$('tres').textContent='Could not start the test.';return}
 if(r.error){$('tres').innerHTML='<div class=hot>✖ '+esc(r.error)+'</div>';return}$('tres').textContent='Starting…';tstat()}
 async function tstat(){let s;try{s=await (await fetch('api/test/status')).json()}catch(e){return}if(s.state==='idle')return;const wait=s.state==='waiting',run=s.state==='running';$('tb').disabled=run;$('tb').textContent=run?`Running… ${s.elapsed}s`:wait?'Cancel':'Run test';if(wait)$('tb').dataset.cancel=1;else delete $('tb').dataset.cancel;
 if(wait){$('tres').innerHTML='<div class=hot style="color:inherit">⏳ <b>Armed — waiting for '+esc(s.ip)+'</b> ('+s.remaining+'s left). '+(s.claimed?'<b>The client helper picked it up and is running the test…</b> It would otherwise run:':'If the client runs iperf_client.py it starts by itself; otherwise run on that client:')+'<pre style="user-select:all;margin:6px 0">'+esc(s.cmd)+'</pre><span class=mut>Link metrics are being sampled ('+s.samples+' so far).'+(s.others&&s.others.length?' Ignored tests from '+esc(s.others.join(', '))+'.':'')+'</span></div>';return}
