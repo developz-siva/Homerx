@@ -338,6 +338,95 @@ class LocalBackend(Backend):
 
 BACKENDS = {"local": LocalBackend, "iw": IwBackend, "wl": WlBackend, "qca": QcaBackend, "sim": SimBackend}
 
+# ----------------------------------------------------------------------------- connection setup (shared by the CLI and the dashboard)
+TRANSPORTS = ("serial", "telnet", "ssh", "ubus", "local", "sim")
+DEFAULT_FLOWS = {"serial": 300, "telnet": 400, "ubus": 400}
+SECRET_KEYS = ("password", "mem_password")
+
+def list_serial_ports():
+    try: from serial.tools import list_ports
+    except ImportError: return {"ok": False, "ports": [], "error": "pyserial is not installed on this PC:  pip install pyserial"}
+    return {"ok": True, "ports": [{"device": p.device, "desc": p.description or ""} for p in sorted(list_ports.comports(), key=lambda p: p.device)]}
+
+def close_runner(r):
+    for name in ("close",):
+        f = getattr(r, name, None)
+        if f:
+            try: f()
+            except Exception: pass
+            return
+    s = getattr(r, "s", None)
+    if s is not None:
+        try: s.close()
+        except Exception: pass
+
+def make_ap_runner(cfg):
+    """Open the connection the user chose. Raises ConnectionError with a message meant to be shown to them."""
+    t = cfg.get("transport") or "ssh"
+    host, user, pw = (cfg.get("host") or "").strip(), (cfg.get("user") or "").strip() or None, cfg.get("password") or None
+    port = int(cfg["port"]) if str(cfg.get("port") or "").strip() else None
+    try:
+        if t == "serial":
+            if not (cfg.get("serial_port") or "").strip(): raise ConnectionError("choose the serial port (for example COM6, or /dev/cu.usbserial-0001)")
+            return SerialRunner(cfg["serial_port"].strip(), int(cfg.get("baud") or 115200), user, pw)
+        if t == "telnet":
+            if not host: raise ConnectionError("enter the device's IP address for telnet")
+            return TelnetRunner(host, port or 23, user, pw)
+        if t == "ubus":
+            if not (cfg.get("http_url") or "").strip(): raise ConnectionError("enter the web address of the device, e.g. http://192.168.1.1")
+            return UbusHttpRunner(cfg["http_url"].strip(), user or "root", pw or "")
+        if t == "ssh":
+            if not host: return Runner(None)                                   # run on this machine / on the AP itself
+            r = subprocess.run(["ssh", "-p", str(port or 22), "-o", "BatchMode=yes", "-o", "ConnectTimeout=6", f"{user or 'root'}@{host}", "echo wm_ok"],
+                               capture_output=True, text=True, timeout=20)
+            if "wm_ok" not in r.stdout:
+                err = (r.stderr or "").strip().splitlines()[-1:] or ["no answer"]
+                hint = " - SSH here uses key login (no password prompt); install your key on the device, or use Telnet / Serial" if "denied" in err[0].lower() else ""
+                raise ConnectionError(f"ssh to {host} failed: {err[0]}{hint}")
+            return Runner(host, user or "root", port or 22)
+    except ConnectionError: raise
+    except subprocess.TimeoutExpired: raise ConnectionError(f"ssh to {host} timed out")
+    except FileNotFoundError: raise ConnectionError("the 'ssh' program is not installed on this PC")
+    except (OSError, ValueError) as e: raise ConnectionError(f"{t} connection failed: {e}")
+    raise ConnectionError(f"unknown connection type '{t}'")
+
+def detect_backend(r):
+    """Ask the device which Wi-Fi tool set it has: Broadcom `wl`, `iw` (nl80211) or Qualcomm `wlanconfig`."""
+    out = r.run("wl ver 2>&1", timeout=15).lower()
+    if out.strip() and "not found" not in out and "applet" not in out and re.search(r"\d+\.\d+", out): return "wl"
+    if "interface" in r.run("iw dev 2>&1", timeout=15).lower(): return "iw"
+    if "wlanconfig" in r.run("which wlanconfig 2>&1", timeout=15): return "qca"
+    return None
+
+def detect_ifaces(r, backend):
+    if backend == "wl":
+        return [i for i in ("wl0", "wl1", "wl2", "wl3") if parse_wl_chanspec(r.run(f"wl -i {i} chanspec", timeout=15))]
+    if backend == "qca":
+        return [x for x in r.run("ls /sys/class/net 2>/dev/null").split() if x.startswith(("ath", "wifi")) and not x.startswith("wifi")]
+    return None
+
+def build_backend(cfg):
+    """cfg -> (backend, runner, info). Raises ConnectionError with a user-readable message."""
+    t, b = cfg.get("transport") or "ssh", cfg.get("backend") or "auto"
+    ifaces = [x.strip() for x in str(cfg.get("ifaces") or "").replace(" ", ",").split(",") if x.strip()] or None
+    info = {"ifaces": ifaces or []}
+    if t == "sim": return SimBackend(None, ifaces), None, {**info, "backend": "sim"}
+    if t == "local": return LocalBackend(Runner(None), ifaces, subnet=(cfg.get("subnet") or None)), None, {**info, "backend": "local"}
+    r = make_ap_runner(cfg)
+    try:
+        if b == "auto":
+            b = detect_backend(r)
+            if not b: raise ConnectionError("connected, but this device has none of wl / iw / wlanconfig - pick the backend by hand")
+        if b not in BACKENDS or b in ("sim", "local"): raise ConnectionError(f"unknown backend '{b}'")
+        if b in ("wl", "qca") and not ifaces:
+            ifaces = detect_ifaces(r, b)
+            if not ifaces: raise ConnectionError(f"connected and found {b}, but no Wi-Fi interfaces answered - enter them (e.g. wl0,wl1)")
+        be = BACKENDS[b](r, ifaces)
+        be.max_flows = int(cfg["max_flows"]) if str(cfg.get("max_flows") or "").strip() else DEFAULT_FLOWS.get(t, 2000)
+        return be, r, {"backend": b, "ifaces": ifaces or []}
+    except Exception:
+        close_runner(r); raise
+
 # ----------------------------------------------------------------------------- monitor
 class Monitor:
     def __init__(self, backend, interval, log_dir=None, types=None, offset=8.0):
@@ -352,6 +441,8 @@ class Monitor:
         self.mem = None                                         # memwatch.MemCollector when --mem-host is given      # server-PC mode: base URL of iperf_agent.py
         self.state = {"ts": 0, "radios": [], "clients": [], "summary": {}}
         self.lock = threading.Lock()
+        self.conn_lock, self.runner, self.mem_dir, self.settings_path = threading.Lock(), None, "memlogs", None
+        self.conn = {"state": "connected" if backend else "setup", "error": "", "info": {}, "label": ""}
 
     def _util(self, iface, s):
         if not s: return {}
@@ -366,15 +457,17 @@ class Monitor:
         return {"util_pct": busy, "tx_pct": tx, "rx_pct": rx, "other_pct": round(max(0, busy - tx - rx), 1)}
 
     def poll(self):
+        be = self.be
+        if be is None: return
         now = time.time(); dt = now - self.last_t if self.last_t else None; self.last_t = now
         radios, stas = [], {}
-        for r in self.be.radios():
-            radios.append({**r, **self._util(r["iface"], self.be.survey(r["iface"]))})
-            for s in self.be.stations(r["iface"]):
+        for r in be.radios():
+            radios.append({**r, **self._util(r["iface"], be.survey(r["iface"]))})
+            for s in be.stations(r["iface"]):
                 s.update(iface=r["iface"], band=r.get("band"), channel=r.get("channel")); stas[s["mac"]] = s
 
-        ip2mac, hosts = self.be.ip_to_mac(), self.be.hostnames()
-        cur = {f["key"]: f for f in self.be.flows()}
+        ip2mac, hosts = be.ip_to_mac(), be.hostnames()
+        cur = {f["key"]: f for f in be.flows()}
         per = {}  # mac -> {up, down, cats{(cat,app): bps}}
         if self.prev_flow is not None and dt:
             for k, f in cur.items():
@@ -479,6 +572,7 @@ class Monitor:
         return next((c for c in st["clients"] if c["mac"] == mac), None) or next((l for l in st.get("lan", []) if l["mac"] == mac), None)
 
     def start_test(self, req):
+        if self.be is None: return {"error": "Not connected to a device - open Connection and connect first."}
         with self.lock:
             if self.test and self.test["state"] in ("running", "waiting"): return {"error": "A test is already running."}
             st = self.state
@@ -627,7 +721,98 @@ class Monitor:
         return planner.plan(client, traffic, quality, n, {r["iface"]: r for r in st["radios"]}, self.offset, client.get("type") if client else None)
 
     def snapshot(self):
-        with self.lock: return json.dumps(self.state)
+        with self.lock: return json.dumps({**self.state, "connection": self.conn_public()})
+
+    # ---- connection set-up from the dashboard ------------------------------------------------------------
+    def conn_public(self):
+        c = dict(self.conn); c["memory"] = self.mem.status() if self.mem else {"enabled": False}
+        c["iperf_server"] = self.iperf_server or ""
+        return c
+
+    def safe_poll(self):
+        try: self.poll(); self.conn["error"] = ""
+        except Exception as e:
+            self.conn["error"] = f"poll failed: {e}"; raise
+
+    def saved_form(self):
+        try:
+            with open(self.settings_path) as f: return json.load(f)
+        except Exception: return {}
+
+    def _save_form(self, cfg):
+        if not self.settings_path: return
+        keep = {k: v for k, v in cfg.items() if k not in SECRET_KEYS}
+        try:
+            os.makedirs(os.path.dirname(os.path.abspath(self.settings_path)), exist_ok=True)
+            with open(self.settings_path, "w") as f: json.dump(keep, f, indent=1)
+        except OSError: pass
+
+    def set_memory(self, cfg, runner=None):
+        """Start / replace / stop the memory collector according to cfg['mem_mode']: off | same | telnet | ssh."""
+        old = self.mem
+        if old: old.stopped = True
+        self.mem = None
+        mode = cfg.get("mem_mode") or "off"
+        if mode == "off": return
+        if mode == "same":
+            if runner is None: raise ConnectionError("memory collection over the same connection needs a device connection (not Demo / This computer)")
+            mr = runner
+        else:
+            host = (cfg.get("mem_host") or "").strip()
+            mport = int(cfg["mem_port"]) if str(cfg.get("mem_port") or "").strip() else None
+            if not host:                                                         # blank = same device as the AP link
+                host = (cfg.get("host") or "").strip()
+                if mport is None and mode == cfg.get("transport") and str(cfg.get("port") or "").strip(): mport = int(cfg["port"])
+            if not host: raise ConnectionError("enter the device address for memory collection")
+            mr = memwatch.make_runner(mode, host, mport, (cfg.get("mem_user") or "").strip() or None, cfg.get("mem_password") or None)
+        try: iv = int(cfg.get("mem_interval") or 60)
+        except ValueError: iv = 60
+        col = memwatch.MemCollector(mr, iv, self.mem_dir, (cfg.get("mem_label") or cfg.get("host") or "").strip())
+        col.fast_check = lambda: bool(self.test and self.test["state"] in ("running", "waiting"))
+        self.mem = col
+        threading.Thread(target=col.loop, daemon=True).start()
+
+    def connect(self, cfg, test=False):
+        """Open the connection described by cfg and (unless test) make it the active one. Returns {ok, error, ...}."""
+        try:
+            be, runner, info = build_backend(cfg)
+            radios = be.radios()
+        except ConnectionError as e: return {"ok": False, "error": str(e)}
+        except Exception as e:
+            try: close_runner(runner)
+            except Exception: pass
+            return {"ok": False, "error": f"could not read the Wi-Fi radios: {e}"}
+        warn = "" if radios else "connected, but no Wi-Fi radios were reported - check the backend and interface names"
+        res = {"ok": True, "backend": info["backend"], "ifaces": info["ifaces"] or [r["iface"] for r in radios], "radios": len(radios), "warning": warn}
+        if test:
+            close_runner(runner); return res
+        with self.conn_lock:
+            old = self.runner
+            self.be, self.runner = be, runner
+            self.rssi_hist, self.mix_hist, self.prev_surv, self.prev_flow, self.prev_sta, self.last_t = {}, {}, {}, None, {}, None
+            self.state = {"ts": 0, "radios": [], "clients": [], "summary": {}}
+            t = cfg.get("transport") or "ssh"
+            where = {"serial": cfg.get("serial_port"), "ubus": cfg.get("http_url"), "local": "this computer", "sim": "demo data"}.get(t) or (cfg.get("host") or "on this machine")
+            self.conn = {"state": "connected", "error": "", "info": {"transport": t, "backend": info["backend"], "ifaces": res["ifaces"]}, "label": f"{t} · {where}"}
+            if old and old is not runner: close_runner(old)
+            self.iperf_server = (cfg.get("iperf_server") or "").strip() or None
+            self.iperf_token = (cfg.get("iperf_token") or "").strip() or self.iperf_token
+            try: self.set_memory(cfg, runner)
+            except ConnectionError as e: res["warning"] = (res["warning"] + " " if res["warning"] else "") + f"memory collection not started: {e}"
+            except Exception as e: res["warning"] = (res["warning"] + " " if res["warning"] else "") + f"memory collection not started: {e}"
+        self._save_form(cfg)
+        try: self.safe_poll()
+        except Exception as e: res["warning"] = (res["warning"] + " " if res["warning"] else "") + f"first poll failed: {e}"
+        return res
+
+    def disconnect(self):
+        with self.conn_lock:
+            old, self.be, self.runner = self.runner, None, None
+            if self.mem: self.mem.stopped = True; self.mem = None
+            if old: close_runner(old)
+            self.state = {"ts": 0, "radios": [], "clients": [], "summary": {}}
+            self.conn = {"state": "setup", "error": "", "info": {}, "label": ""}
+        return {"ok": True}
 
 def _r1(x): return None if x is None else round(x, 1)
 
@@ -710,7 +895,38 @@ th{color:var(--mut);font-weight:500}.mut{color:var(--mut)}.tag{display:inline-bl
 .tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin:10px 0}.tile{border:1px solid var(--line);border-radius:8px;padding:10px}
 .tile b{display:block;font-size:20px}.tile span{color:var(--mut);font-size:12px}
 .v{display:inline-block;padding:3px 10px;border-radius:12px;font-weight:600;color:#fff}.v.good{background:#12b76a}.v.marginal{background:#f79009}.v.poor{background:#d92d20}.v.unknown{background:#667085}</style></head><body>
-<h1>Wi-Fi Monitor <span class=mut id=ts></span> <a href="/mem" style="font-size:13px;font-weight:400;margin-left:12px">Device memory &rarr;</a></h1>
+<h1>Wi-Fi Monitor <span class=mut id=ts></span> <a href="/mem" style="font-size:13px;font-weight:400;margin-left:12px">Device memory &rarr;</a> <span id=cs class=tag style="cursor:pointer;font-weight:400;margin-left:12px" onclick=toggleConn()>connection</span></h1>
+<div class=card id=conn style="display:none"><h2>Connection - how to collect logs from the device</h2>
+<div class=ctl>
+<label>Collect via<select id=f_transport><option value=serial>Serial console</option><option value=telnet>Telnet</option><option value=ssh>SSH</option><option value=ubus>Web API (ubus)</option><option value=local>This computer (no AP access)</option><option value=sim>Demo data</option></select></label>
+<label data-t="serial telnet ssh ubus">Wi-Fi tools on device<select id=f_backend><option value=auto>Auto-detect</option><option value=wl>wl (Broadcom)</option><option value=iw>iw (nl80211)</option><option value=qca>wlanconfig (Qualcomm)</option></select></label>
+<label data-t="serial telnet ssh ubus sim">Interfaces (blank = auto)<input id=f_ifaces placeholder="wl0,wl1"></label>
+<label data-t="serial">Serial port<input id=f_serial_port list=portlist placeholder="COM6" autocomplete=off></label><datalist id=portlist></datalist>
+<label data-t="serial">Baud<input id=f_baud value=115200 style="min-width:90px"></label>
+<label data-t="telnet ssh">Device IP<input id=f_host placeholder="192.168.1.254"></label>
+<label data-t="telnet ssh">Port<input id=f_port style="min-width:80px"></label>
+<label data-t="ubus">Web address<input id=f_http_url placeholder="http://192.168.1.1"></label>
+<label data-t="serial telnet ssh ubus">User (if asked)<input id=f_user autocomplete=off></label>
+<label data-t="serial telnet ubus">Password<input id=f_password type=password autocomplete=new-password></label>
+<label data-t="local">LAN to scan<input id=f_subnet placeholder="192.168.1.0/24"></label>
+<label data-t="serial telnet ubus">Max flows/poll<input id=f_max_flows placeholder="default" style="min-width:90px"></label>
+</div>
+<div class=mut data-t="serial" style="margin:-4px 0 10px"><button type=button onclick="ports()">Refresh ports</button> <span id=portmsg></span> &nbsp;Close PuTTY / Tera Term first: only one program can hold a serial port.</div>
+<div class=mut data-t="ssh" style="margin:-4px 0 10px">SSH uses key login (no password prompt). If you only have a password, use Telnet or Serial.</div>
+<h2 style="margin-top:6px">Memory collection (optional)</h2>
+<div class=ctl>
+<label>Collect memory via<select id=f_mem_mode><option value=off>Off</option><option value=same>Same connection as above</option><option value=telnet>Separate telnet login</option><option value=ssh>Separate SSH login</option></select></label>
+<label data-m="telnet ssh">Device IP (blank = same)<input id=f_mem_host></label>
+<label data-m="telnet ssh">Port<input id=f_mem_port style="min-width:80px"></label>
+<label data-m="telnet">User (if asked)<input id=f_mem_user autocomplete=off></label>
+<label data-m="telnet">Password<input id=f_mem_password type=password autocomplete=new-password></label>
+<label data-m="same telnet ssh">Every (s)<input id=f_mem_interval value=60 style="min-width:80px"></label>
+<label data-m="same telnet ssh">Name on graphs<input id=f_mem_label></label></div>
+<h2 style="margin-top:6px">Throughput tests (optional)</h2>
+<div class=ctl><label>iperf agent URL<input id=f_iperf_server placeholder="http://192.168.1.3:8099"></label><label>Agent token<input id=f_iperf_token autocomplete=off></label></div>
+<div><button type=button onclick="connAct('test')">Test</button> <button type=button onclick="connAct('go')"><b>Connect</b></button> <button type=button onclick="disc()">Disconnect</button>
+<span id=cmsg class=mut style="margin-left:10px"></span></div>
+<p class=mut style="margin-bottom:0">Passwords are used for this session only and never saved. Other settings are remembered for next time.</p></div>
 <div class=card><h2>Traffic planner</h2>
 <div class=ctl><label>Client<select id=pc></select></label><label>Traffic<select id=pt></select></label>
 <label>Quality<select id=pq></select></label><label>Simultaneous streams<input id=pn type=number min=1 max=20 value=1 style="min-width:80px"></label></div>
@@ -725,8 +941,33 @@ th{color:var(--mut);font-weight:500}.mut{color:var(--mut)}.tag{display:inline-bl
 <div class=card><h2>Insights &amp; recommendations</h2><div id=ins></div></div>
 <div class=card><h2>Clients</h2><table id=t></table></div>
 <script>
+const FIELDS=['transport','backend','ifaces','serial_port','baud','host','port','user','password','http_url','subnet','max_flows','mem_mode','mem_host','mem_port','mem_user','mem_password','mem_interval','mem_label','iperf_server','iperf_token'];
+const $f=i=>document.getElementById('f_'+i);let connOpened=false;
+function vis(){const t=$f('transport').value,m=$f('mem_mode').value,d={serial:'115200',telnet:'23',ssh:'22'};
+document.querySelectorAll('[data-t]').forEach(e=>e.style.display=e.dataset.t.split(' ').includes(t)?'':'none');
+document.querySelectorAll('[data-m]').forEach(e=>e.style.display=e.dataset.m.split(' ').includes(m)?'':'none');
+$f('port').placeholder=d[t]||'';if(t=='serial')ports()}
+function collect(){const o={};FIELDS.forEach(k=>{const e=$f(k);if(e)o[k]=e.value});return o}
+async function post(u,o){const r=await fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(o)});
+if(!r.ok)throw new Error(r.status==403?'only the PC that runs the dashboard can change the connection':r.statusText);return r.json()}
+async function ports(){try{const p=await (await fetch('api/ports')).json();document.getElementById('portlist').innerHTML=p.ports.map(x=>`<option value="${esc(x.device)}">${esc(x.desc)}</option>`).join('');
+document.getElementById('portmsg').textContent=p.ok?(p.ports.length?p.ports.map(x=>x.device).join(', ')+' found.':'No serial ports found.'):p.error}catch(e){}}
+async function connAct(k){const m=document.getElementById('cmsg');m.className='mut';m.textContent=k=='test'?'Testing...':'Connecting... (can take 10-20 s)';let r;
+try{r=await post(k=='test'?'api/connect/test':'api/connect',collect())}catch(e){m.className='hot';m.textContent='Request failed: '+e.message;return}
+if(!r.ok){m.className='hot';m.textContent=r.error;return}
+m.className='mut';m.textContent=(k=='test'?'Works: ':'Connected: ')+r.backend+', '+r.radios+' radio(s)'+(r.ifaces.length?' ('+r.ifaces.join(', ')+')':'')+(r.warning?' - '+r.warning:'');
+if(k!='test'){$f('password').value='';$f('mem_password').value='';tick();if(!r.warning)setTimeout(()=>{document.getElementById('conn').style.display='none'},1500)}}
+async function disc(){try{await post('api/disconnect',{})}catch(e){}document.getElementById('cmsg').textContent='Disconnected.';tick()}
+function toggleConn(){const c=document.getElementById('conn');c.style.display=c.style.display=='none'?'':'none'}
+function showConn(c){const s=document.getElementById('cs'),ok=c.state=='connected';
+s.textContent=(ok?'● ':'○ ')+(ok?c.label:'not connected - click to set up')+(c.error?' (!)':'');s.title=c.error||'';s.style.color=c.error?'#d92d20':(ok?'#12b76a':'')
+if(!ok&&!connOpened){connOpened=true;document.getElementById('conn').style.display=''}}
+async function connInit(){FIELDS.forEach(k=>{const e=$f(k);if(e)e.addEventListener('change',vis)});
+try{const c=await (await fetch('api/connection')).json();for(const k in (c.form||{})){const e=$f(k);if(e&&!/password/.test(k))e.value=c.form[k]}}catch(e){}vis()}
+connInit();
 const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 async function tick(){let s;try{s=await (await fetch('api/state')).json()}catch(e){return}
+if(s.connection)showConn(s.connection);
 if(!s.ts)return;document.getElementById('ts').textContent='· '+new Date(s.ts*1000).toLocaleTimeString();
 document.getElementById('radios').innerHTML=s.radios.map(r=>{const u=r.util_pct;return `<div class=card><h2>${esc(r.iface)} · ${esc(r.band)} · ch ${esc(r.channel)}</h2>
 <div style="font-size:26px" class="${u>70?'hot':''}">${u==null?'n/a':u+'%'} <span class=mut style="font-size:13px">channel busy</span></div>
@@ -771,7 +1012,7 @@ if($('tb').dataset.cancel){await fetch('api/test/cancel',{method:'POST',headers:
 let r;try{r=await (await fetch('api/test/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mac,traffic:k,quality:$('pq').value,secs:+$('td').value,streams:+$('tsn').value,rate:+$('tr').value})})).json()}catch(e){$('tres').textContent='Could not start the test.';return}
 if(r.error){$('tres').innerHTML='<div class=hot>✖ '+esc(r.error)+'</div>';return}$('tres').textContent='Starting…';tstat()}
 async function tstat(){let s;try{s=await (await fetch('api/test/status')).json()}catch(e){return}if(s.state==='idle')return;const wait=s.state==='waiting',run=s.state==='running';$('tb').disabled=run;$('tb').textContent=run?`Running… ${s.elapsed}s`:wait?'Cancel':'Run test';if(wait)$('tb').dataset.cancel=1;else delete $('tb').dataset.cancel;
-if(wait){$('tres').innerHTML='<div class=hot style="color:inherit">⏳ <b>Armed — waiting for '+esc(s.ip)+'</b> ('+s.remaining+'s left). '+(s.claimed?'<b>The client helper picked it up and is running the test…</b> It would otherwise run:':'If the client runs iperf_client.py it starts by itself; otherwise run on that client:')+<pre style="user-select:all;margin:6px 0">'+esc(s.cmd)+'</pre><span class=mut>Link metrics are being sampled ('+s.samples+' so far).'+(s.others&&s.others.length?' Ignored tests from '+esc(s.others.join(', '))+'.':'')+'</span></div>';return}
+if(wait){$('tres').innerHTML='<div class=hot style="color:inherit">⏳ <b>Armed — waiting for '+esc(s.ip)+'</b> ('+s.remaining+'s left). '+(s.claimed?'<b>The client helper picked it up and is running the test…</b> It would otherwise run:':'If the client runs iperf_client.py it starts by itself; otherwise run on that client:')+'<pre style="user-select:all;margin:6px 0">'+esc(s.cmd)+'</pre><span class=mut>Link metrics are being sampled ('+s.samples+' so far).'+(s.others&&s.others.length?' Ignored tests from '+esc(s.others.join(', '))+'.':'')+'</span></div>';return}
 if(s.state==='cancelled'){$('tres').innerHTML='<span class=mut>Cancelled.</span>';return}
 if(run){$('tres').innerHTML='<span class=mut>Test in progress. Sampling link metrics ('+s.samples+' so far)…</span>';return}renderTest(s)}
 function renderTest(s){const r=s.result||{};if(!r.ok){$('tres').innerHTML='<div class=hot>✖ '+esc(r.error||'failed')+'</div>';return}const L=r.link||{};let h='<div class=tiles>';
@@ -798,6 +1039,8 @@ def serve(mon, bind, port):
                 self.send_response(code); self.send_header("Content-Type", ct); self.send_header("Content-Length", str(len(body)))
                 for k, v in hdr.items(): self.send_header(k, v)
                 self.end_headers(); self.wfile.write(body); return
+            elif u.path == "/api/connection": body, ct = json.dumps({**mon.conn_public(), "form": mon.saved_form(), "transports": list(TRANSPORTS)}).encode(), "application/json"
+            elif u.path == "/api/ports": body, ct = json.dumps(list_serial_ports()).encode(), "application/json"
             elif u.path == "/api/config": body, ct = json.dumps(mon.config()).encode(), "application/json"
             elif u.path == "/api/test/pending": body, ct = json.dumps(mon.pending_for(self.client_address[0], qs.get("ip"))).encode(), "application/json"
             elif u.path == "/api/test/status": body, ct = json.dumps(mon.test_status()).encode(), "application/json"
@@ -808,11 +1051,16 @@ def serve(mon, bind, port):
             self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
         def do_POST(self):
             u = urlparse(self.path)
-            if self.client_address[0] not in ("127.0.0.1", "::1") and not mon.allow_remote_tests: self.send_error(403, "tests can only be started from this machine (see --allow-remote-tests)"); return
+            if u.path.startswith("/api/connect") or u.path == "/api/disconnect":      # carries device passwords: this machine only, never remote
+                if self.client_address[0] not in ("127.0.0.1", "::1"): self.send_error(403, "the connection can only be changed from this machine"); return
+            elif self.client_address[0] not in ("127.0.0.1", "::1") and not mon.allow_remote_tests: self.send_error(403, "tests can only be started from this machine (see --allow-remote-tests)"); return
             if "application/json" not in (self.headers.get("Content-Type") or ""): self.send_error(415); return   # forces a CORS preflight for cross-site pages
-            try: req = json.loads(self.rfile.read(min(int(self.headers.get("Content-Length") or 0), 10000)) or b"{}")
+            try: req = json.loads(self.rfile.read(min(int(self.headers.get("Content-Length") or 0), 20000)) or b"{}")
             except Exception: req = {}
-            if u.path == "/api/mem/event": body = json.dumps(memwatch.handle_post(mon.mem, u.path, req)).encode()
+            if u.path == "/api/connect": body = json.dumps(mon.connect(req)).encode()
+            elif u.path == "/api/connect/test": body = json.dumps(mon.connect(req, test=True)).encode()
+            elif u.path == "/api/disconnect": body = json.dumps(mon.disconnect()).encode()
+            elif u.path == "/api/mem/event": body = json.dumps(memwatch.handle_post(mon.mem, u.path, req)).encode()
             elif u.path == "/api/test/start": body = json.dumps(mon.start_test(req)).encode()
             elif u.path == "/api/test/cancel": body = json.dumps(mon.cancel_test()).encode()
             else: self.send_error(404); return
@@ -824,7 +1072,8 @@ def serve(mon, bind, port):
 # ----------------------------------------------------------------------------- main
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--backend", choices=BACKENDS, default="iw")
+    ap.add_argument("--backend", choices=BACKENDS, help="wifi tool set on the device (default: auto-detect)")
+    ap.add_argument("--setup", action="store_true", help="start with no connection and choose serial / telnet / SSH in the dashboard (this is also the default when no device is given)")
     ap.add_argument("--transport", choices=["ssh", "telnet", "serial", "ubus"], default="ssh",
                     help="how to reach the AP: ssh (default), telnet, serial console, or ubus-over-HTTP web API (OpenWrt/prplOS)")
     ap.add_argument("--host", help="AP address for ssh / telnet (omit with ssh to run locally on the AP)")
@@ -863,51 +1112,45 @@ def main():
     ap.add_argument("--console", action="store_true", help="print table every interval as well")
     a = ap.parse_args()
     if a.transport != "ssh" and a.backend == "local": ap.error("--backend local doesn't use --transport")
-    pw = a.password if a.password is not None else os.environ.get("WIFI_PASS")
-    if a.transport == "serial":
-        if not a.serial_port: ap.error("--transport serial needs --serial-port")
-        if pw is None and a.serial_user:
-            import getpass; pw = getpass.getpass("Console password: ")
-        runner = SerialRunner(a.serial_port, a.baud, a.serial_user, pw)
-    elif a.transport == "telnet":
-        if not a.host: ap.error("--transport telnet needs --host")
-        if pw is None and a.telnet_user:
-            import getpass; pw = getpass.getpass(f"Password for {a.telnet_user}@{a.host}: ")
-        try: runner = TelnetRunner(a.host, a.telnet_port, a.telnet_user, pw)
-        except ConnectionError as e: sys.exit(f"telnet to the AP failed: {e}")
-    elif a.transport == "ubus":
-        if not a.http_url: ap.error("--transport ubus needs --http-url")
-        if pw is None:
-            import getpass; pw = getpass.getpass(f"Web password for {a.http_user}: ")
-        runner = UbusHttpRunner(a.http_url, a.http_user, pw)
-    else:
-        runner = Runner(a.host, a.user, a.ssh_port)
-    args_ = (runner, a.ifaces.split(",") if a.ifaces else None)
-    be = LocalBackend(*args_, subnet=a.subnet) if a.backend == "local" else BACKENDS[a.backend](*args_)
     types = json.load(open(a.clients_file)) if a.clients_file else {}
     for kv in a.client:
         k, _, v = kv.partition("=")
         if not norm_type(v): ap.error(f"unknown client type '{v}' in --client {kv}; use one of {', '.join(PROFILES)}")
         types[k] = v
-    be.max_flows = a.max_flows if a.max_flows is not None else {"serial": 300, "telnet": 400, "ubus": 400}.get(a.transport, 2000)
-    mon = Monitor(be, a.interval, a.log_dir, types, a.band_offset)
+    setup = a.setup or (a.backend is None and not (a.host or a.serial_port or a.http_url or a.mem_transport == "local"))
+    mon = Monitor(None, a.interval, a.log_dir, types, a.band_offset)
+    mon.mem_dir, mon.settings_path = a.mem_dir, os.path.join(a.log_dir or ".", "connection.json")
     mon.iperf_from, mon.allow_remote_tests, mon.iperf_port = a.iperf_from, a.allow_remote_tests, a.iperf_port
     mon.iperf_src, mon.bind_client, mon.iperf_bin = a.iperf_src, not a.no_client_bind, a.iperf_bin
     mon.iperf_server, mon.iperf_token, mon.iperf_server_ip = a.iperf_server, a.iperf_token, a.iperf_server_ip
-    if a.mem_host or a.mem_transport == "local":
-        mon.mem = memwatch.collector_from_args(a, "mem-")
-        mon.mem.fast_check = lambda: bool(mon.test and mon.test["state"] in ("running", "waiting"))       # sample every 5 s around tests
-        threading.Thread(target=mon.mem.loop, daemon=True).start()
-        print(f"Memory collector: {a.mem_host} via {a.mem_transport} every {a.mem_interval}s -> {a.mem_dir}/   page: http://{a.bind}:{a.port}/mem")
+    if not setup:
+        pw = a.password if a.password is not None else os.environ.get("WIFI_PASS")
+        user = {"serial": a.serial_user, "telnet": a.telnet_user, "ubus": a.http_user}.get(a.transport) or (a.user if a.transport == "ssh" else None)
+        need = a.transport == "ubus" or (a.transport in ("serial", "telnet") and (a.serial_user if a.transport == "serial" else a.telnet_user))
+        if pw is None and need and a.backend not in ("local", "sim"):
+            import getpass; pw = getpass.getpass(f"Password for {user or 'the device'}: ")
+        cfg = {"transport": a.backend if a.backend in ("local", "sim") else a.transport, "backend": a.backend or "auto", "host": a.host, "port": a.telnet_port if a.transport == "telnet" else a.ssh_port,
+               "user": user, "password": pw, "serial_port": a.serial_port, "baud": a.baud, "http_url": a.http_url, "ifaces": a.ifaces, "subnet": a.subnet, "max_flows": a.max_flows,
+               "iperf_server": a.iperf_server}
+        if a.mem_host or a.mem_transport == "local":
+            mpw = a.mem_password if a.mem_password is not None else os.environ.get("MEM_PASS")
+            if mpw is None and a.mem_user and a.mem_transport == "telnet":
+                import getpass; mpw = getpass.getpass(f"Password for {a.mem_user}@{a.mem_host}: ")
+            cfg.update(mem_mode=a.mem_transport, mem_host=a.mem_host, mem_port=a.mem_port, mem_user=a.mem_user, mem_password=mpw, mem_interval=a.mem_interval, mem_label=a.mem_label)
+        res = mon.connect(cfg)
+        if not res["ok"]: sys.exit(f"could not connect: {res['error']}\n(start with --setup to fix the settings in the dashboard instead)")
+        if res.get("warning"): print("note:", res["warning"])
+        if mon.mem: print(f"Memory collector: {a.mem_host or 'this machine'} via {a.mem_transport} every {a.mem_interval}s -> {a.mem_dir}/   page: http://{a.bind}:{a.port}/mem")
+    else:
+        print("No device given: open the dashboard and choose Serial / Telnet / SSH under Connection.")
     if a.once:
         mon.poll(); time.sleep(a.interval); mon.poll(); print_table(mon.state); print_insights(mon.state); return
-    mon.poll()
     def bg():
         while True:
             time.sleep(mon.sleep_for())
             try:
-                mon.poll()
-                if a.console: print_table(mon.state); print_insights(mon.state)
+                mon.safe_poll()
+                if a.console and mon.state.get("ts"): print_table(mon.state); print_insights(mon.state)
             except Exception as e: sys.stderr.write(f"[error] {e}\n")
     threading.Thread(target=bg, daemon=True).start()
     print(f"Dashboard: http://{a.bind}:{a.port}/   (Ctrl-C to stop)")

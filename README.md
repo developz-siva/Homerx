@@ -65,6 +65,20 @@ Capacity is a model, not a speed test.
     python3 wifi_monitor.py --backend local                       # MacBook only
     python3 wifi_monitor.py --backend iw --host 192.168.1.1       # with AP data
 
+## Easiest: start the dashboard and pick the connection in it
+    py wifi_monitor.py                       # Windows        python3 wifi_monitor.py   # macOS / Linux
+    py wifi_monitor.py --log-dir logs --bind 0.0.0.0     # add --bind 0.0.0.0 if clients run iperf_client.py
+
+With no device given, the dashboard opens with a **Connection** panel. Choose how logs are collected - **Serial console**, **Telnet**, **SSH**,
+**Web API (ubus)**, **This computer**, or **Demo data** - fill in the fields (serial port list with a Refresh button, baud, IP, user, password), press **Test**
+to check it without switching, then **Connect**. The Wi-Fi tool set (`wl` / `iw` / `wlanconfig`) and the interfaces (wl0..wl3) are auto-detected unless you
+enter them. The same panel sets up **memory collection** (over the same connection, or a separate telnet / SSH login) and the **iperf agent URL**.
+Click the status chip at the top (e.g. `● telnet · 192.168.1.254`) to reopen the panel, change the connection, or Disconnect.
+- Passwords are used for the session only and are never saved; the other fields are remembered in `<log-dir>/connection.json`.
+- The connection can only be changed from the PC running the dashboard (loopback), never from another machine.
+- Serial "Access is denied": another program (PuTTY, Tera Term) has the port open - close it. SSH here is key-login only; with just a password use Telnet or Serial.
+- All the old command-line options still work (`--transport`, `--host`, `--serial-port`, ...); `--setup` forces the panel even when they are given.
+
 ## Reaching the AP: SSH, telnet, serial console, or web API (--transport)
 All backends (iw / wl / qca) work over any transport.
 

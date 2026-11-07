@@ -1,0 +1,14 @@
+{
+ "transport": "telnet",
+ "backend": "wl",
+ "host": "127.0.0.1",
+ "port": 36365,
+ "user": "admin",
+ "serial_port": null,
+ "baud": 115200,
+ "http_url": null,
+ "ifaces": "wl1",
+ "subnet": null,
+ "max_flows": 0,
+ "iperf_server": null
+}

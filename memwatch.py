@@ -84,6 +84,7 @@ class MemCollector:
         self.r, self.interval, self.dir, self.label = runner, max(5, interval), outdir, label
         self.rows, self.procs, self.last_top = [], [], ""             # rows: list of dicts; procs: list of (ts, name, rss_kb, count)
         self.lock, self.errors, self.last_error, self.polls = threading.Lock(), 0, "", 0
+        self.stopped = False
         self.events, self.fast_check, self.fast_interval = [], None, 5     # events: tests / manual markers shown on the graphs
         os.makedirs(outdir, exist_ok=True); self._load()
 
@@ -171,11 +172,11 @@ class MemCollector:
         except OSError as e: self.last_error = f"cannot write {path}: {e}"
 
     def loop(self):
-        while True:
+        while not self.stopped:
             t0 = time.time()
             try: self.poll()
             except Exception as e: self.errors += 1; self.last_error = str(e)
-            while time.time() - t0 < self.sleep_for():           # re-check every 0.5 s so a test that starts mid-wait speeds sampling up at once
+            while not self.stopped and time.time() - t0 < self.sleep_for():           # re-check every 0.5 s so a test that starts mid-wait speeds sampling up at once
                 time.sleep(0.5)
 
     def status(self):

@@ -31,11 +31,19 @@ class SerialRunner:
     """Send `cmd; echo <marker>` on the console and read until the marker. The marker is typed with '' inside it so that an
     echoed command line can't be mistaken for the real marker."""
     host = "serial"
+    def close(self):
+        try: self.s.close()
+        except Exception: pass
     def __init__(self, port, baud=115200, user=None, password=None, _serial=None):
         if _serial is None:
             try: import serial
-            except ImportError: sys.exit("serial transport needs pyserial:  pip install pyserial")
-            _serial = serial.Serial(port, baud, timeout=0.2)
+            except ImportError: raise ConnectionError("serial transport needs pyserial:  pip install pyserial")
+            try: _serial = serial.Serial(port, baud, timeout=0.2)
+            except Exception as e:
+                m = str(e)
+                hint = (" - another program (PuTTY, Tera Term, a serial monitor) is probably holding the port; close it and retry" if "denied" in m.lower() or "busy" in m.lower() else
+                        " - check the port name (Windows: COM3, macOS: /dev/cu.usbserial-*, Linux: /dev/ttyUSB0)" if "could not open" in m.lower() or "no such" in m.lower() else "")
+                raise ConnectionError(f"cannot open {port}: {m}{hint}")
         self.s, self.lock, self.n = _serial, threading.Lock(), 0
         self._login(user, password)
         self._raw("stty -echo 2>/dev/null; PS1=''\n", 1.0)
@@ -50,10 +58,10 @@ class SerialRunner:
     def _login(self, user, password):
         out = self._raw("\n", 1.5).lower()
         if "login:" in out:
-            if not user: sys.exit("console is at a login prompt: pass --serial-user / --password")
+            if not user: raise ConnectionError("console is at a login prompt: enter the user name and password")
             out = self._raw(user + "\n", 1.5).lower()
         if "password:" in out:
-            if password is None: sys.exit("console asks for a password: pass --password")
+            if password is None: raise ConnectionError("console asks for a password: enter it")
             self._raw(password + "\n", 2.0)
 
     def run(self, cmd, timeout=20):
@@ -187,7 +195,7 @@ class UbusHttpRunner:
     def _login(self):
         r = self._call("0" * 32, "session", "login", {"username": self.user, "password": self.password})
         try: self.sid = r["result"][1]["ubus_rpc_session"]
-        except Exception: sys.exit(f"ubus login failed ({r.get('error') or r.get('result')}); check URL / user / password")
+        except Exception: raise ConnectionError(f"ubus login failed ({r.get('error') or r.get('result')}); check URL / user / password")
     def run(self, cmd, timeout=15):
         try:
             for attempt in (0, 1):
