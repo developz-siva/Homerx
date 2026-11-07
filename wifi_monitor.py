@@ -376,7 +376,9 @@ def make_ap_runner(cfg):
             if not (cfg.get("http_url") or "").strip(): raise ConnectionError("enter the web address of the device, e.g. http://192.168.1.1")
             return UbusHttpRunner(cfg["http_url"].strip(), user or "root", pw or "")
         if t == "ssh":
-            if not host: return Runner(None)                                   # run on this machine / on the AP itself
+            if not host:
+                if cfg.get("ssh_local") and os.name != "nt": return Runner(None)       # CLI only: dashboard is running on the AP itself
+                raise ConnectionError("enter the device's IP address for SSH (leaving it blank would run the commands on this PC, which has no Wi-Fi AP tools)")
             r = subprocess.run(["ssh", "-p", str(port or 22), "-o", "BatchMode=yes", "-o", "ConnectTimeout=6", f"{user or 'root'}@{host}", "echo wm_ok"],
                                capture_output=True, text=True, timeout=20)
             if "wm_ok" not in r.stdout:
@@ -1131,7 +1133,7 @@ def main():
             import getpass; pw = getpass.getpass(f"Password for {user or 'the device'}: ")
         cfg = {"transport": a.backend if a.backend in ("local", "sim") else a.transport, "backend": a.backend or "auto", "host": a.host, "port": a.telnet_port if a.transport == "telnet" else a.ssh_port,
                "user": user, "password": pw, "serial_port": a.serial_port, "baud": a.baud, "http_url": a.http_url, "ifaces": a.ifaces, "subnet": a.subnet, "max_flows": a.max_flows,
-               "iperf_server": a.iperf_server}
+               "iperf_server": a.iperf_server, "ssh_local": True}
         if a.mem_host or a.mem_transport == "local":
             mpw = a.mem_password if a.mem_password is not None else os.environ.get("MEM_PASS")
             if mpw is None and a.mem_user and a.mem_transport == "telnet":

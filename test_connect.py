@@ -50,6 +50,9 @@ class Connect(unittest.TestCase):
         self.assertIn("IP", self.mon.connect({"transport": "telnet"})["error"])
         self.assertIn("web address", self.mon.connect({"transport": "ubus"})["error"])
 
+    def test_ssh_without_host_is_refused_in_the_dashboard(self):
+        self.assertIn("IP address for SSH", self.mon.connect({"transport": "ssh", "host": ""})["error"])
+
     def test_bad_serial_port_gives_a_hint(self):
         r = self.mon.connect({"transport": "serial", "serial_port": "/dev/does-not-exist-9"})
         self.assertFalse(r["ok"]); self.assertRegex(r["error"], r"(?i)pyserial|cannot open")
