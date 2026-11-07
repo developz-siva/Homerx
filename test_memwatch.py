@@ -199,4 +199,81 @@ class Web(unittest.TestCase):
     def test_not_enabled(self):
         self.assertEqual(m.handle_get(None, "/api/mem", {})[0], 404); self.assertEqual(m.handle_get(None, "/mem", {})[0], 200)
 
+
+class Events(unittest.TestCase):
+    def _synth_with_event(self, kept_mb, peak_mb=30, secs=600):
+        rows, procs, now = synth(hours=6, leak_mb_h=0.0, proc_leak=0.0, step=60)
+        s0 = now - 3 * 3600; e0 = s0 + secs
+        for r in rows:                                    # the activity raises memory by peak_mb, then keeps kept_mb of it
+            if s0 <= r["ts"] <= e0: r["avail_kb"] -= peak_mb * 1024
+            elif r["ts"] > e0: r["avail_kb"] -= kept_mb * 1024
+        return rows, procs, now, {"id": 1, "start": s0, "end": e0, "label": "iperf3 tcp up 300 Mbps", "kind": "test"}
+    def test_memory_not_released_is_flagged(self):
+        rows, procs, now, ev = self._synth_with_event(kept_mb=12); d = m.analyse(rows, procs, 24, "", "", now, [ev]); e = d["events"][0]
+        self.assertAlmostEqual(e["retained"], 12, delta=0.1); self.assertAlmostEqual(e["peak_rise"], 30, delta=0.1)
+        self.assertTrue(any(i["sev"] == "warn" and "not released" in i["title"] and "iperf3 tcp up" in i["title"] for i in d["insights"]))
+    def test_released_memory_is_only_a_note(self):
+        rows, procs, now, ev = self._synth_with_event(kept_mb=0); d = m.analyse(rows, procs, 24, "", "", now, [ev])
+        self.assertFalse(any("not released" in i["title"] for i in d["insights"])); self.assertTrue(any("raised memory use by 30 MB" in i["title"] for i in d["insights"]))
+    def test_event_shorter_than_the_sampling_interval(self):
+        rows, procs, now, ev = self._synth_with_event(kept_mb=0, secs=20); ev["start"] = rows[100]["ts"] + 10; ev["end"] = ev["start"] + 20
+        d = m.analyse(rows, procs, 24, "", "", now, [ev]); self.assertEqual(d["events"][0]["samples"], 0); self.assertTrue(any("No memory sample fell inside" in i["title"] for i in d["insights"]))
+    def test_open_event_has_no_after(self):
+        rows, procs, now, ev = self._synth_with_event(kept_mb=0); ev["end"] = None; e = m.analyse(rows, procs, 24, "", "", now, [ev])["events"][0]
+        self.assertTrue(e["open"]); self.assertIsNone(e["retained"])
+    def test_pdf_lists_events(self):
+        rows, procs, now, ev = self._synth_with_event(kept_mb=12); b = m.build_pdf(m.analyse(rows, procs, 24, "top\n", "gw", now, [ev]))
+        if shutil.which("pdftotext"):
+            f = tempfile.mktemp(suffix=".pdf"); open(f, "wb").write(b); txt = subprocess.run(["pdftotext", "-layout", f, "-"], capture_output=True, text=True).stdout
+            self.assertIn("Tests and markers", txt); self.assertIn("iperf3 tcp up 300 Mbps", txt); self.assertIn("+12.0", txt)
+    def test_collector_events_persist_and_speed_up_sampling(self):
+        tmp = tempfile.mkdtemp(); c = m.MemCollector(None, 60, tmp); self.assertEqual(c.sleep_for(), 60)
+        e = c.add_event("Teams call"); self.assertEqual(c.sleep_for(), 5); self.assertEqual(c.open_event()["label"], "Teams call")
+        time.sleep(0.05); self.assertIsNotNone(c.end_event()); self.assertEqual(c.sleep_for(), 60); self.assertIsNone(c.end_event())
+        c2 = m.MemCollector(None, 60, tmp); self.assertEqual([(x["label"], x["end"] is not None) for x in c2.events], [("Teams call", True)])
+        c.fast_check = lambda: True; self.assertEqual(c.sleep_for(), 5)
+    def test_post_api(self):
+        c = m.MemCollector(None, 60, tempfile.mkdtemp())
+        self.assertTrue(m.handle_post(c, "/api/mem/event", {"action": "start", "label": "Video"})["ok"])
+        self.assertIn("still running", m.handle_post(c, "/api/mem/event", {"action": "start", "label": "x"})["error"])
+        self.assertTrue(m.handle_post(c, "/api/mem/event", {"action": "end"})["ok"]); self.assertIn("No activity", m.handle_post(c, "/api/mem/event", {"action": "end"})["error"])
+        self.assertIn("start or end", m.handle_post(c, "/api/mem/event", {"action": "zap"})["error"]); self.assertIsNone(m.handle_post(c, "/other", {}))
+    def test_finished_test_becomes_a_shaded_window(self):
+        mon = w.Monitor(w.SimBackend(w.Runner(None)), 1, None); mon.poll(); mon.mem = m.MemCollector(None, 60, tempfile.mkdtemp())
+        t = {"state": "running", "tool": "iperf3", "mode": "tcp_up", "mac": "x", "ip": "192.168.1.5", "secs": 10, "streams": 1, "rate": 50, "started": time.time() - 12, "samples": [], "result": None, "util_before": None}
+        mon.test = t; mon._finish_test(t, {"ok": True, "tool": "iperf3", "mode": "tcp_up", "mbps": 312.4})
+        ev = mon.mem.events[0]; self.assertEqual(ev["kind"], "test"); self.assertIn("iperf3 tcp up 312.4 Mbps (192.168.1.5)", ev["label"]); self.assertAlmostEqual(ev["end"] - ev["start"], 12, delta=1)
+    def test_marker_http_endpoint_rules(self):
+        col = m.MemCollector(None, 60, tempfile.mkdtemp()); mon = w.Monitor(w.SimBackend(w.Runner(None)), 1, None); mon.poll(); mon.mem = col
+        threading.Thread(target=w.serve, args=(mon, "127.0.0.1", 8747), daemon=True).start(); time.sleep(0.6)
+        def post(body, ct="application/json"):
+            rq = urllib.request.Request("http://127.0.0.1:8747/api/mem/event", json.dumps(body).encode(), {"Content-Type": ct})
+            return json.loads(urllib.request.urlopen(rq, timeout=5).read())
+        self.assertTrue(post({"action": "start", "label": "video"})["ok"]); self.assertTrue(post({"action": "end"})["ok"]); self.assertEqual(col.events[0]["label"], "video")
+        with self.assertRaises(urllib.error.HTTPError) as e: post({"action": "start"}, ct="text/plain")
+        self.assertEqual(e.exception.code, 415)                                                          # cross-site forms cannot do this
+
+from test_iperf_server import start_agent, monitor as _mon, wait_state, client as iperf_client, IPORT
+import speedtools as sp
+@unittest.skipUnless(shutil.which("iperf3"), "iperf3 binary not on PATH")
+class TestWindowOnMemoryGraph(unittest.TestCase):
+    def test_armed_iperf_test_is_marked_and_memory_sampled_during_it(self):
+        a, srv, url = start_agent(port=5746); time.sleep(1.2)
+        mon, mac = _mon(url); mon.iperf_server_ip = "127.0.0.1"
+        col = m.MemCollector(m_runner_local(), 60, tempfile.mkdtemp(), "local"); col.fast_interval = 1; mon.mem = col
+        col.fast_check = lambda: bool(mon.test and mon.test["state"] in ("running", "waiting"))
+        threading.Thread(target=col.loop, daemon=True).start(); time.sleep(1.5)
+        try:
+            self.assertEqual(mon.start_test({"mac": mac, "traffic": "iperf3", "quality": sp.MODES["tcp_up"], "secs": 3}), {"ok": True}); time.sleep(2)
+            c = subprocess.Popen(["iperf3", "-c", "127.0.0.1", "-p", "5746", "-t", "3"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); c.wait(timeout=20)
+            self.assertTrue(wait_state(mon, ("done",), 30)); time.sleep(1.5)
+            ev = [e for e in col.events if e["kind"] == "test"]; self.assertEqual(len(ev), 1); self.assertIn("iperf3 tcp up", ev[0]["label"])
+            inside = [r for r in col.rows if ev[0]["start"] <= r["ts"] <= ev[0]["end"]]; self.assertGreaterEqual(len(inside), 2)      # 1 s sampling while the test ran
+            d = col.snapshot(24); self.assertEqual(d["events"][0]["label"], ev[0]["label"]); self.assertGreaterEqual(d["events"][0]["samples"], 2)
+        finally: srv.shutdown()
+
+def m_runner_local():
+    from transport import Runner
+    return Runner(None)
+
 if __name__ == "__main__": unittest.main()

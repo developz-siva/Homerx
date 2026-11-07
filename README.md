@@ -105,6 +105,13 @@ header then has a **Device memory** link (`/mem`). The password may also come fr
   (no matplotlib / reportlab), so it works on a plain Windows Python.
 - **Findings:** in-use memory growing (MB/hour and hours until the free memory is gone), the process or kernel slab that is growing, low
   available memory, swap use, device reboots (trends restart after a reboot) and gaps in the data. Leak detection needs about 2 h of history.
+- **Memory while you run other tests (one tool, not separate):** start `wifi_monitor.py` with the `--mem-host ...` options. The memory
+  collector runs in its own thread with its own telnet connection, so it keeps going during iperf3 / speedtest runs. Every finished
+  throughput test is added to the memory graphs as a shaded window (e.g. "iperf3 tcp up 312 Mbps (192.168.1.5)"), sampling speeds up to every
+  5 s while a test is armed or running, and the report shows memory **before / peak / after** each test plus **Kept MB**. A test that leaves
+  memory behind is flagged ("Memory was not released after ..."), which catches leaks that only happen under load.
+  For anything else (a Teams call, Netflix on the TV, a video test) type a name on the Device memory page and press **Start**, then
+  **End** when finished: it is shaded the same way and sampled every 5 s while open. The windows and the table are in the PDF too.
 - **Telnet:** a built-in client (no `telnetlib`, which Python 3.13 removed) that handles an optional login and reconnects if the device
   drops the connection. Needs a root shell on the device; busybox `grep`, `cat` and `top` are enough. The telnet password travels in clear text:
   use it on a trusted LAN only (use `--transport ssh` otherwise).

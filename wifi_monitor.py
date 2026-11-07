@@ -554,6 +554,7 @@ class Monitor:
             t["n_raw"] = len(t["samples"])
             t["samples"] = [x for x in t["samples"] if fin - win <= x.get("t", fin) <= fin + 1]
             t["mode"], t["secs"] = res["mode"], res.get("secs") or t["secs"]
+            t["win"] = (fin - t["secs"] - 1, fin)
             if res.get("target_mbps"): t["rate"] = res["target_mbps"]
         self._finish_test(t, res)
 
@@ -576,6 +577,11 @@ class Monitor:
             res["insights"] = _test_insights(res, t)
             if self.log_dir: self._log_test(t, res)
         t["result"], t["finished"] = res, time.time()
+        if self.mem and res.get("ok"):                           # show the test as a shaded window on the memory graphs
+            w0, w1 = t.get("win") or (t["started"], t["finished"])
+            what = (f"iperf3 {res['mode'].replace('_', ' ')} {res['mbps']:g} Mbps" if res.get("tool") == "iperf3" else f"speedtest {res.get('down_mbps')} down")
+            try: self.mem.add_event(f"{what} ({(t.get('ip') or 'local')})", w0, w1, "test")
+            except Exception as e: sys.stderr.write(f"[warn] could not record the test on the memory graph: {e}\n")
         t["state"] = "done" if res.get("ok") else "error"
 
     def test_status(self):
@@ -803,7 +809,8 @@ def serve(mon, bind, port):
             if "application/json" not in (self.headers.get("Content-Type") or ""): self.send_error(415); return   # forces a CORS preflight for cross-site pages
             try: req = json.loads(self.rfile.read(min(int(self.headers.get("Content-Length") or 0), 10000)) or b"{}")
             except Exception: req = {}
-            if u.path == "/api/test/start": body = json.dumps(mon.start_test(req)).encode()
+            if u.path == "/api/mem/event": body = json.dumps(memwatch.handle_post(mon.mem, u.path, req)).encode()
+            elif u.path == "/api/test/start": body = json.dumps(mon.start_test(req)).encode()
             elif u.path == "/api/test/cancel": body = json.dumps(mon.cancel_test()).encode()
             else: self.send_error(404); return
             self.send_response(200); self.send_header("Content-Type", "application/json")
@@ -873,7 +880,9 @@ def main():
     mon.iperf_from, mon.allow_remote_tests, mon.iperf_port = a.iperf_from, a.allow_remote_tests, a.iperf_port
     mon.iperf_server, mon.iperf_token, mon.iperf_server_ip = a.iperf_server, a.iperf_token, a.iperf_server_ip
     if a.mem_host or a.mem_transport == "local":
-        mon.mem = memwatch.collector_from_args(a, "mem-"); threading.Thread(target=mon.mem.loop, daemon=True).start()
+        mon.mem = memwatch.collector_from_args(a, "mem-")
+        mon.mem.fast_check = lambda: bool(mon.test and mon.test["state"] in ("running", "waiting"))       # sample every 5 s around tests
+        threading.Thread(target=mon.mem.loop, daemon=True).start()
         print(f"Memory collector: {a.mem_host} via {a.mem_transport} every {a.mem_interval}s -> {a.mem_dir}/   page: http://{a.bind}:{a.port}/mem")
     if a.once:
         mon.poll(); time.sleep(a.interval); mon.poll(); print_table(mon.state); print_insights(mon.state); return
