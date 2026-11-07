@@ -147,6 +147,16 @@ monitor samples that client's RSSI, PHY rates, Tx retries and radio busy % about
   - **Ubuntu / Linux / macOS:** `sudo apt install iperf3 python3`, then `python3 iperf_client.py --dashboard http://<dashboard PC>:8080`.
   - **Android:** install Termux, then `pkg install python iperf3` and run the same script. Keep Termux in the foreground (or acquire its wakelock).
   - **iPhone/iPad:** iOS cannot run background scripts, so use any iperf3 app and type the command the dashboard shows.
+- **Several networks (e.g. a management IP besides the LAN IP): choose the source address.** iperf3's `-B` pins which local address a test
+  uses, so traffic leaves by the right network instead of whatever the routing table prefers.
+  - *Server PC:* `py iperf_agent.py --iperf-bind 192.168.1.3` listens only on that address (`iperf3 -s -B`); the page and the client
+    command then show that IP. Keep `--iperf-server-ip` equal to it if you set that.
+  - *Wi-Fi client:* the dashboard adds `-B <client's Wi-Fi IP>` to the command it shows (turn off with `--no-client-bind`), which also makes the
+    test arrive from the IP the dashboard knows, so it is matched correctly. `iperf_client.py` applies it automatically; if the client reaches the
+    dashboard over another network, give its Wi-Fi address once: `py iperf_client.py --dashboard http://<dashboard>:8080 --bind 192.168.1.77`
+    (used as `-B` and to identify the device). `--no-bind` ignores the suggestion.
+  - *Tests the dashboard runs itself* (client runs `iperf3 -s`): `--iperf-src <this PC's LAN IP>`.
+  `-B` pins the address, not the interface: if two interfaces are on the same subnet the OS may still choose; use different subnets or a host route.
 - **speedtest**: internet speed of the machine running the dashboard (not of the selected client). Needs the Ookla CLI
   (`brew tap teamookla/speedtest && brew install speedtest`, Windows `winget install Ookla.Speedtest.CLI`) or `pip install speedtest-cli`.
 - Results include insights (UDP loss/jitter thresholds, high retries, busy radio) and are appended to

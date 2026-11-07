@@ -146,3 +146,48 @@ class ClientHelperEndToEnd(unittest.TestCase):
             self.assertTrue(wait_state(mon, ("done", "error"), 40), mon.test_status()); st = mon.test_status()
             self.assertEqual(st["state"], "done", st); self.assertGreater(st["result"]["mbps"], 100); self.assertEqual(st["result"]["mode"], "tcp_up")
         finally: helper.kill(); srv.shutdown()
+
+class SourceBinding(unittest.TestCase):
+    def test_client_command_and_argv_carry_the_source(self):
+        self.assertEqual(s.client_cmd("10.0.0.2", 5201, "tcp_down", 10, 1, 1, bind="192.168.1.77"), "iperf3 -c 10.0.0.2 -t 10 -R -B 192.168.1.77")
+        self.assertEqual(s.iperf3_argv("192.168.1.9", "tcp_down", 5, 1, 1, bind="192.168.1.2")[-2:], ["-B", "192.168.1.2"])
+        self.assertNotIn("-B", s.iperf3_argv("192.168.1.9", "tcp_down", 5, 1, 1))
+        for f in (lambda: s.client_cmd("10.0.0.2", 5201, "tcp_up", 5, 1, 1, bind="x;y"), lambda: s.iperf3_argv("10.0.0.2", "tcp_up", 5, 1, 1, bind="$(id)")):
+            with self.assertRaises(ValueError): f()
+    def test_helper_argv_uses_dashboard_suggestion_or_own_override(self):
+        j = {"server_ip": "10.0.0.2", "port": 5201, "mode": "tcp_up", "secs": 5, "streams": 1, "rate": 1, "bind": "192.168.1.77"}
+        self.assertEqual(ic.build_argv(j)[-2:], ["-B", "192.168.1.77"]); self.assertEqual(ic.build_argv(j, bind="192.168.1.5")[-2:], ["-B", "192.168.1.5"])
+        self.assertNotIn("-B", ic.build_argv(j, bind=None)); self.assertNotIn("-B", ic.build_argv({**j, "bind": None}))
+    def test_pending_matches_the_stated_wifi_ip_when_polling_over_another_network(self):
+        be = w.SimBackend(w.Runner(None)); mac = be.cl[0][0]; be.ip_to_mac = lambda: {"192.168.1.77": mac}
+        mon = w.Monitor(be, 1, None); mon.poll()
+        mon.test = {"state": "waiting", "server": True, "ips": ["192.168.1.77"], "server_ip": "192.168.1.3", "port": 5201, "mode": "tcp_up", "secs": 10, "streams": 1, "rate": 50, "claimed": False, "bind": "192.168.1.77"}
+        self.assertEqual(mon.pending_for("10.20.0.9"), {"pending": False})                         # management address alone is not enough
+        self.assertEqual(mon.pending_for("10.20.0.9", "192.168.1.5"), {"pending": False})         # a Wi-Fi IP that is not this client's
+        j = mon.pending_for("10.20.0.9", "192.168.1.77"); self.assertTrue(j["pending"]); self.assertEqual(j["bind"], "192.168.1.77")
+    def test_armed_command_binds_the_clients_ip_unless_disabled(self):
+        a, srv, url = start_agent(port=5747); time.sleep(0.5)
+        try:
+            for on, expect in ((True, "-B 127.0.0.1"), (False, None)):
+                mon, mac = monitor(url); mon.iperf_server_ip, mon.bind_client = "127.0.0.1", on
+                mon.start_test({"mac": mac, "traffic": "iperf3", "quality": s.MODES["tcp_up"], "secs": 3}); cmd = mon.test_status()["cmd"]; mon.cancel_test()
+                self.assertTrue(cmd.endswith(expect) if expect else "-B" not in cmd, cmd)
+        finally: srv.shutdown()
+
+@unittest.skipUnless(shutil.which("iperf3"), "iperf3 binary not on PATH")
+class SourceBindingReal(unittest.TestCase):
+    def test_agent_listens_only_on_the_bound_address_and_client_binds_its_source(self):
+        a = ag.Agent(5748, bind="127.0.0.1"); threading.Thread(target=a.run_forever, daemon=True).start(); time.sleep(1.3)
+        self.assertEqual((a.status()["state"], a.status()["server_ip"]), ("listening", "127.0.0.1"))
+        r = subprocess.run(["iperf3", "-c", "127.0.0.1", "-p", "5748", "-t", "2", "-B", "127.0.0.1", "-J"], capture_output=True, text=True, timeout=30); self.assertEqual(r.returncode, 0, r.stdout[-300:])
+        for _ in range(20):
+            if a.status()["last_id"]: break
+            time.sleep(0.3)
+        p = s.parse_iperf3_server(a.results_after(0)["results"][0]["raw"]); self.assertEqual(p["remote_host"], "127.0.0.1"); self.assertGreater(p["mbps"], 100)
+    def test_bad_bind_address_is_reported(self):
+        a = ag.Agent(5749, bind="203.0.113.77"); threading.Thread(target=a.run_forever, daemon=True).start(); time.sleep(1.5)
+        self.assertEqual(a.status()["state"], "error"); self.assertTrue(a.status()["last_error"])
+    def test_dashboard_run_uses_the_source(self):
+        srv = subprocess.Popen(["iperf3", "-s", "-1", "-p", "5750", "-B", "127.0.0.1"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); time.sleep(0.8)
+        try: r = s.run_iperf3("127.0.0.1", "tcp_down", 2, 1, 1, port=5750, bind="127.0.0.1"); self.assertTrue(r["ok"], r); self.assertGreater(r["mbps"], 100)
+        finally: srv.kill()

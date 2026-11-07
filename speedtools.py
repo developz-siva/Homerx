@@ -11,13 +11,14 @@ import ipaddress, json, shlex, shutil, subprocess
 MODES = {"tcp_down": "TCP download (host → client)", "tcp_up": "TCP upload (client → host)",
          "udp_down": "UDP download (host → client)", "udp_up": "UDP upload (client → host)"}
 
-def iperf3_argv(ip, mode, secs, streams, rate_mbps, port=5201):
+def iperf3_argv(ip, mode, secs, streams, rate_mbps, port=5201, bind=None):
     ipaddress.ip_address(ip)                                   # never pass anything but a literal IP to the command line
     if mode not in MODES: raise ValueError(f"unknown iperf3 mode {mode}")
     argv = ["iperf3", "-c", ip, "-p", str(int(port)), "-t", str(int(secs)), "-P", str(int(streams)), "-J"]
     if mode.startswith("tcp") and secs >= 6: argv += ["-O", "2"]            # skip TCP slow start in the totals
     if mode.startswith("udp"): argv += ["-u", "-b", f"{float(rate_mbps):g}M"]
     if mode.endswith("up"): argv.append("-R")
+    if bind: ipaddress.ip_address(bind); argv += ["-B", bind]       # source address: pins the route when this machine has several networks
     return argv
 
 def _series(j):
@@ -44,13 +45,14 @@ def parse_iperf3(text, mode):
         res.update(mbps=round((rcv.get("bits_per_second") or snd.get("bits_per_second", 0)) / 1e6, 2), retransmits=snd.get("retransmits"))
     return res
 
-def client_cmd(server_ip, port, mode, secs, streams, rate_mbps):
+def client_cmd(server_ip, port, mode, secs, streams, rate_mbps, bind=None):
     """The command the Wi-Fi client should run against the server PC."""
     ipaddress.ip_address(server_ip)
     c = f"iperf3 -c {server_ip}" + (f" -p {int(port)}" if int(port) != 5201 else "") + f" -t {int(secs)}"
     if int(streams) > 1: c += f" -P {int(streams)}"
     if mode.startswith("udp"): c += f" -u -b {float(rate_mbps):g}M"
     if mode.endswith("down"): c += " -R"
+    if bind: ipaddress.ip_address(bind); c += f" -B {bind}"
     return c
 
 def norm_host(h):
@@ -89,9 +91,9 @@ def _friendly(err):
         return "Could not connect: start an iperf3 server on the client first (`iperf3 -s`) and allow port 5201 through its firewall. (" + err[:80] + ")"
     return err
 
-def run_iperf3(ip, mode, secs=10, streams=1, rate_mbps=50, runner=None, port=5201):
+def run_iperf3(ip, mode, secs=10, streams=1, rate_mbps=50, runner=None, port=5201, bind=None):
     """runner=None -> run on this machine; runner=<transport Runner> -> run on the AP."""
-    argv = iperf3_argv(ip, mode, secs, streams, rate_mbps, port)
+    argv = iperf3_argv(ip, mode, secs, streams, rate_mbps, port, bind)
     try:
         if runner is not None:
             out = runner.run(" ".join(shlex.quote(a) for a in argv) + " 2>&1", timeout=secs + 30)

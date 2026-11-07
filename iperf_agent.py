@@ -24,8 +24,8 @@ def lan_ip():
     finally: s.close()
 
 class Agent:
-    def __init__(self, iperf_port=5201, iperf_bin="iperf3", token=None):
-        self.iperf_port, self.iperf_bin, self.token = iperf_port, iperf_bin, token
+    def __init__(self, iperf_port=5201, iperf_bin="iperf3", token=None, bind=None):
+        self.iperf_port, self.iperf_bin, self.token, self.bind = iperf_port, iperf_bin, token, bind
         self.results, self.next_id = collections.deque(maxlen=50), 1
         self.state, self.last_error, self.lock = "starting", "", threading.Lock()
 
@@ -42,7 +42,7 @@ class Agent:
             if not shutil.which(self.iperf_bin): time.sleep(5); continue
             self.state = "listening"
             try:
-                p = subprocess.Popen([self.iperf_bin, "-s", "-1", "-J", "-p", str(self.iperf_port)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                p = subprocess.Popen([self.iperf_bin, "-s", "-1", "-J", "-p", str(self.iperf_port)] + (["-B", self.bind] if self.bind else []), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
                 out, err = p.communicate()
             except Exception as e:
                 self.state, self.last_error = "error", str(e); time.sleep(3); continue
@@ -67,7 +67,7 @@ class Agent:
     def status(self):
         with self.lock: last = self.next_id - 1
         return {"ok": True, "state": self.state, "last_error": self.last_error, "iperf_port": self.iperf_port,
-                "server_ip": lan_ip(), "hostname": socket.gethostname(), "last_id": last}
+                "server_ip": self.bind or lan_ip(), "hostname": socket.gethostname(), "last_id": last}
 
     def results_after(self, after):
         now = time.monotonic()
@@ -103,13 +103,14 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--iperf-port", type=int, default=5201, help="port the iperf3 server listens on (default 5201)")
     ap.add_argument("--iperf-bin", default="iperf3", help='path to iperf3 if it is not on PATH, e.g. --iperf-bin "C:\\tools\\iperf3\\iperf3.exe"')
+    ap.add_argument("--iperf-bind", metavar="IP", help="listen for iperf3 only on this local address (iperf3 -s -B); use it when this PC has several networks")
     ap.add_argument("--http-port", type=int, default=8099, help="port the dashboard reads results from (default 8099)")
     ap.add_argument("--bind", default="0.0.0.0", help="HTTP bind address (default all interfaces so the dashboard PC can reach it)")
     ap.add_argument("--token", help="optional shared secret; the dashboard must be started with the same --iperf-token")
     a = ap.parse_args()
-    agent = Agent(a.iperf_port, iperf_bin=a.iperf_bin, token=a.token)
+    agent = Agent(a.iperf_port, iperf_bin=a.iperf_bin, token=a.token, bind=a.iperf_bind)
     threading.Thread(target=agent.run_forever, daemon=True).start()
-    ip = lan_ip() or "<this PC's IP>"
+    ip = a.iperf_bind or lan_ip() or "<this PC's IP>"
     print(f"iperf3 server listening on {ip}:{a.iperf_port}\nDashboard option:  --iperf-server http://{ip}:{a.http_port}" + (f" --iperf-token {a.token}" if a.token else "") +
           "\nOn a Wi-Fi client run:  iperf3 -c " + ip + "   (add -R for download, -u -b 50M for UDP)\nCtrl-C to stop.", flush=True)
     try: make_server(agent, a.bind, a.http_port).serve_forever()

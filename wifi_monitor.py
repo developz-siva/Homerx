@@ -347,6 +347,7 @@ class Monitor:
         self.prev_surv, self.prev_flow, self.prev_sta = {}, None, {}
         self.last_t = None
         self.test, self.iperf_from, self.allow_remote_tests, self.iperf_port = None, "host", False, 5201
+        self.iperf_src, self.bind_client = None, True      # iperf_src: -B for tests run from the dashboard; bind_client: put -B <client IP> in the client command
         self.iperf_server, self.iperf_token, self.iperf_server_ip, self.arm_timeout = None, None, None, 180
         self.mem = None                                         # memwatch.MemCollector when --mem-host is given      # server-PC mode: base URL of iperf_agent.py
         self.state = {"ts": 0, "radios": [], "clients": [], "summary": {}}
@@ -502,7 +503,8 @@ class Monitor:
                  "rate": rate, "started": time.time(), "samples": [], "result": None, "server": True, "server_ip": sip, "port": ag.get("iperf_port", 5201),
                  "after": ag.get("last_id", 0), "others": [], "cancel": False, "claimed": False, "deadline": time.time() + self.arm_timeout,
                  "util_before": next((r.get("util_pct") for r in st["radios"] if r["iface"] == client.get("iface")), None)}
-            t["cmd"] = speedtools.client_cmd(sip, t["port"], t["mode"], secs, streams, rate)
+            t["bind"] = ip if self.bind_client else None
+            t["cmd"] = speedtools.client_cmd(sip, t["port"], t["mode"], secs, streams, rate, t["bind"])
             self.test = t
             threading.Thread(target=self._wait_test, args=(t,), daemon=True).start()
             return {"ok": True}
@@ -562,7 +564,7 @@ class Monitor:
         try:
             if t["tool"] == "iperf3":
                 res = speedtools.run_iperf3(t["ip"], t["mode"], t["secs"], t["streams"], t["rate"],
-                                            runner=self.be.r if self.iperf_from == "ap" else None, port=self.iperf_port)
+                                            runner=self.be.r if self.iperf_from == "ap" else None, port=self.iperf_port, bind=self.iperf_src)
             else:
                 res = speedtools.run_speedtest()
         except Exception as e:
@@ -592,12 +594,13 @@ class Monitor:
         if t.get("server"): out |= {"server": True, "cmd": t["cmd"], "server_ip": t["server_ip"], "others": t["others"], "remaining": max(0, round(t["deadline"] - time.time())), "claimed": t["claimed"]}
         return out
 
-    def pending_for(self, ip):
-        """What an iperf_client.py helper running on `ip` should do now. Matched on the requester's real source IP."""
+    def pending_for(self, ip, ident=None):
+        """What an iperf_client.py helper should do now. Matched on the requester's source IP, or on the Wi-Fi IP it states itself
+        (`ident`) when it reaches the dashboard over another network (e.g. a management address)."""
         t = self.test
-        if not (t and t.get("server") and t["state"] == "waiting" and ip in t["ips"] and not t["claimed"]): return {"pending": False}
+        if not (t and t.get("server") and t["state"] == "waiting" and (ip in t["ips"] or ident in t["ips"]) and not t["claimed"]): return {"pending": False}
         t["claimed"] = True
-        return {"pending": True, "server_ip": t["server_ip"], "port": t["port"], "mode": t["mode"], "secs": t["secs"], "streams": t["streams"], "rate": t["rate"]}
+        return {"pending": True, "server_ip": t["server_ip"], "port": t["port"], "mode": t["mode"], "secs": t["secs"], "streams": t["streams"], "rate": t["rate"], "bind": t.get("bind")}
 
     def cancel_test(self):
         t = self.test
@@ -796,7 +799,7 @@ def serve(mon, bind, port):
                 for k, v in hdr.items(): self.send_header(k, v)
                 self.end_headers(); self.wfile.write(body); return
             elif u.path == "/api/config": body, ct = json.dumps(mon.config()).encode(), "application/json"
-            elif u.path == "/api/test/pending": body, ct = json.dumps(mon.pending_for(self.client_address[0])).encode(), "application/json"
+            elif u.path == "/api/test/pending": body, ct = json.dumps(mon.pending_for(self.client_address[0], qs.get("ip"))).encode(), "application/json"
             elif u.path == "/api/test/status": body, ct = json.dumps(mon.test_status()).encode(), "application/json"
             elif u.path.startswith("/api/state"): body, ct = mon.snapshot().encode(), "application/json"
             elif self.path in ("/", "/index.html"): body, ct = HTML.encode(), "text/html; charset=utf-8"
@@ -844,6 +847,8 @@ def main():
     ap.add_argument("--subnet", help="LAN to scan for --backend local (default: your /24, e.g. 192.168.1.0/24)")
     ap.add_argument("--iperf-from", choices=["host", "ap"], default="host",
                     help="where iperf3 runs for the dashboard's throughput test: this machine (default) or on the AP (AP needs iperf3 installed)")
+    ap.add_argument("--iperf-src", metavar="IP", help="source address (iperf3 -B) for tests the dashboard runs itself; use it when this PC has several networks")
+    ap.add_argument("--no-client-bind", action="store_true", help="server-PC mode: do not add -B <client IP> to the client command")
     ap.add_argument("--iperf-port", type=int, default=5201, help="iperf3 server port on the client (default 5201)")
     ap.add_argument("--iperf-server", metavar="URL", help="server-PC mode: URL of iperf_agent.py on a LAN PC (e.g. http://192.168.1.50:8099). "
                     "Run test then waits for the selected client to run `iperf3 -c <that PC>`")
@@ -878,6 +883,7 @@ def main():
     be.max_flows = a.max_flows if a.max_flows is not None else {"serial": 300, "ubus": 400}.get(a.transport, 2000)
     mon = Monitor(be, a.interval, a.log_dir, types, a.band_offset)
     mon.iperf_from, mon.allow_remote_tests, mon.iperf_port = a.iperf_from, a.allow_remote_tests, a.iperf_port
+    mon.iperf_src, mon.bind_client = a.iperf_src, not a.no_client_bind
     mon.iperf_server, mon.iperf_token, mon.iperf_server_ip = a.iperf_server, a.iperf_token, a.iperf_server_ip
     if a.mem_host or a.mem_transport == "local":
         mon.mem = memwatch.collector_from_args(a, "mem-")
