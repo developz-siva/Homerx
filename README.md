@@ -65,11 +65,13 @@ Capacity is a model, not a speed test.
     python3 wifi_monitor.py --backend local                       # MacBook only
     python3 wifi_monitor.py --backend iw --host 192.168.1.1       # with AP data
 
-## Reaching the AP: SSH, serial console, or web API (--transport)
+## Reaching the AP: SSH, telnet, serial console, or web API (--transport)
 All backends (iw / wl / qca) work over any transport.
 
     # SSH (default)
     python3 wifi_monitor.py --backend iw --host 192.168.1.1
+    # Telnet (no serial cable / no ssh): optional login, reconnects by itself. Password via --password, env WIFI_PASS, or prompt.
+    py wifi_monitor.py --backend wl --transport telnet --host 192.168.10.254 --telnet-user admin --ifaces wl1
     # Serial console (USB-UART). pip3 install pyserial ; port on macOS: ls /dev/cu.usb*
     python3 wifi_monitor.py --backend iw --transport serial --serial-port /dev/cu.usbserial-0001 --baud 115200 \
         [--serial-user root --password ...]

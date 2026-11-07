@@ -17,7 +17,7 @@ import argparse, csv, json, os, random, re, shlex, socket, subprocess, sys, thre
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import discovery, memwatch, planner, speedtools
-from transport import Runner, SerialRunner, UbusHttpRunner
+from transport import Runner, SerialRunner, TelnetRunner, UbusHttpRunner
 from urllib.parse import urlparse, parse_qs
 from advisor import advise, advise_radio, resolve_type, norm_type, PROFILES
 
@@ -825,9 +825,11 @@ def serve(mon, bind, port):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--backend", choices=BACKENDS, default="iw")
-    ap.add_argument("--transport", choices=["ssh", "serial", "ubus"], default="ssh",
-                    help="how to reach the AP: ssh (default), serial console, or ubus-over-HTTP web API (OpenWrt/prplOS)")
-    ap.add_argument("--host", help="AP address for ssh (omit to run locally on the AP)")
+    ap.add_argument("--transport", choices=["ssh", "telnet", "serial", "ubus"], default="ssh",
+                    help="how to reach the AP: ssh (default), telnet, serial console, or ubus-over-HTTP web API (OpenWrt/prplOS)")
+    ap.add_argument("--host", help="AP address for ssh / telnet (omit with ssh to run locally on the AP)")
+    ap.add_argument("--telnet-user", help="login name for --transport telnet, if the device asks for one")
+    ap.add_argument("--telnet-port", type=int, default=23)
     ap.add_argument("--serial-port", help="e.g. /dev/cu.usbserial-0001 (macOS) - for --transport serial")
     ap.add_argument("--baud", type=int, default=115200)
     ap.add_argument("--serial-user", help="console login name, if the console shows a login prompt")
@@ -867,6 +869,12 @@ def main():
         if pw is None and a.serial_user:
             import getpass; pw = getpass.getpass("Console password: ")
         runner = SerialRunner(a.serial_port, a.baud, a.serial_user, pw)
+    elif a.transport == "telnet":
+        if not a.host: ap.error("--transport telnet needs --host")
+        if pw is None and a.telnet_user:
+            import getpass; pw = getpass.getpass(f"Password for {a.telnet_user}@{a.host}: ")
+        try: runner = TelnetRunner(a.host, a.telnet_port, a.telnet_user, pw)
+        except ConnectionError as e: sys.exit(f"telnet to the AP failed: {e}")
     elif a.transport == "ubus":
         if not a.http_url: ap.error("--transport ubus needs --http-url")
         if pw is None:
@@ -881,7 +889,7 @@ def main():
         k, _, v = kv.partition("=")
         if not norm_type(v): ap.error(f"unknown client type '{v}' in --client {kv}; use one of {', '.join(PROFILES)}")
         types[k] = v
-    be.max_flows = a.max_flows if a.max_flows is not None else {"serial": 300, "ubus": 400}.get(a.transport, 2000)
+    be.max_flows = a.max_flows if a.max_flows is not None else {"serial": 300, "telnet": 400, "ubus": 400}.get(a.transport, 2000)
     mon = Monitor(be, a.interval, a.log_dir, types, a.band_offset)
     mon.iperf_from, mon.allow_remote_tests, mon.iperf_port = a.iperf_from, a.allow_remote_tests, a.iperf_port
     mon.iperf_src, mon.bind_client, mon.iperf_bin = a.iperf_src, not a.no_client_bind, a.iperf_bin

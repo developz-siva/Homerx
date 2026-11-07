@@ -1,5 +1,5 @@
 """memwatch: parsing, leak analysis, PDF, telnet transport (against a fake telnetd that runs real commands), web glue."""
-import json, os, re, shutil, socket, subprocess, tempfile, threading, time, unittest, urllib.request
+import json, os, re, shutil, socket, subprocess, sys, tempfile, threading, time, unittest, urllib.request
 import memwatch as m, transport as tr, wifi_monitor as w
 
 BUSYBOX = """MemTotal:         123456 kB
@@ -275,5 +275,28 @@ class TestWindowOnMemoryGraph(unittest.TestCase):
 def m_runner_local():
     from transport import Runner
     return Runner(None)
+
+
+
+class ApOverTelnet(unittest.TestCase):
+    """The Wi-Fi monitor itself (not only the memory collector) can read the AP over telnet."""
+    def test_wifi_monitor_once_over_telnet(self):
+        here = os.path.dirname(os.path.abspath(__file__)); d = tempfile.mkdtemp(); stub = os.path.join(d, "wl")
+        open(stub, "w").write('#!/bin/sh\ncase "$*" in\n *"sta_info all"*) cat "%s/wl_sta_info_all_6g.txt";;\n *chanspec*) echo "6g101/320-2 (0x7043)";;\n'
+                              ' *chanim_stats*) printf "chanspec tx inbss obss nocat nopkt doze txop goodtx badtx glitch badplcp knoise timestamp\\n0x7043 1 2 6 0 3 0 88 0 0 5 0 -89 1\\n";;\n *assoclist*) ;;\nesac\n' % here)
+        os.chmod(stub, 0o755); old = os.environ["PATH"]; os.environ["PATH"] = d + ":" + old
+        srv = FakeTelnetd(user="admin", password="pw")
+        try:
+            r = subprocess.run([sys.executable, os.path.join(here, "wifi_monitor.py"), "--backend", "wl", "--transport", "telnet", "--host", "127.0.0.1", "--telnet-port", str(srv.port),
+                                "--telnet-user", "admin", "--password", "pw", "--ifaces", "wl1", "--max-flows", "0", "--once"], capture_output=True, text=True, timeout=120, env={**os.environ})
+            self.assertEqual(r.returncode, 0, r.stderr[-600:]); self.assertIn("6G", r.stdout); self.assertRegex(r.stdout, r"(?i)[0-9a-f]{2}(:[0-9a-f]{2}){5}")
+        finally: os.environ["PATH"] = old; srv.close()
+    def test_wrong_password_exits_with_a_clear_message(self):
+        srv = FakeTelnetd(user="admin", password="pw")
+        try:
+            r = subprocess.run([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "wifi_monitor.py"), "--backend", "wl", "--transport", "telnet", "--host", "127.0.0.1",
+                                "--telnet-port", str(srv.port), "--telnet-user", "admin", "--password", "bad", "--ifaces", "wl1", "--once"], capture_output=True, text=True, timeout=60)
+            self.assertNotEqual(r.returncode, 0); self.assertIn("login was rejected", r.stderr + r.stdout)
+        finally: srv.close()
 
 if __name__ == "__main__": unittest.main()
