@@ -772,7 +772,7 @@ class Monitor:
         self.mem = col
         threading.Thread(target=col.loop, daemon=True).start()
 
-    def connect(self, cfg, test=False):
+    def connect(self, cfg, test=False, save=True):
         """Open the connection described by cfg and (unless test) make it the active one. Returns {ok, error, ...}."""
         try:
             be, runner, info = build_backend(cfg)
@@ -800,7 +800,7 @@ class Monitor:
             try: self.set_memory(cfg, runner)
             except ConnectionError as e: res["warning"] = (res["warning"] + " " if res["warning"] else "") + f"memory collection not started: {e}"
             except Exception as e: res["warning"] = (res["warning"] + " " if res["warning"] else "") + f"memory collection not started: {e}"
-        self._save_form(cfg)
+        if save: self._save_form(cfg)
         try: self.safe_poll()
         except Exception as e: res["warning"] = (res["warning"] + " " if res["warning"] else "") + f"first poll failed: {e}"
         return res
@@ -1137,7 +1137,7 @@ def main():
             if mpw is None and a.mem_user and a.mem_transport == "telnet":
                 import getpass; mpw = getpass.getpass(f"Password for {a.mem_user}@{a.mem_host}: ")
             cfg.update(mem_mode=a.mem_transport, mem_host=a.mem_host, mem_port=a.mem_port, mem_user=a.mem_user, mem_password=mpw, mem_interval=a.mem_interval, mem_label=a.mem_label)
-        res = mon.connect(cfg)
+        res = mon.connect(cfg, save=False)
         if not res["ok"]: sys.exit(f"could not connect: {res['error']}\n(start with --setup to fix the settings in the dashboard instead)")
         if res.get("warning"): print("note:", res["warning"])
         if mon.mem: print(f"Memory collector: {a.mem_host or 'this machine'} via {a.mem_transport} every {a.mem_interval}s -> {a.mem_dir}/   page: http://{a.bind}:{a.port}/mem")

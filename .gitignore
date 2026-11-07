@@ -1,5 +1,7 @@
-__pycache__/
 *.py[cod]
-.venv/
-logs/
 .DS_Store
+.venv/
+__pycache__/
+connection.json
+logs/
+memlogs/
