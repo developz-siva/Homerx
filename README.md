@@ -45,7 +45,7 @@ vs RSSI), real-time call readiness (Teams etc.) and airtime on its radio; radios
 median of the last 8 samples. Treat band advice as a strong hint; confirm with 802.11k beacon reports
 (`hostapd_cli req_beacon`) or by testing the client on the other band.
 
-## Traffic planner (select a client + traffic type)
+## Test clients (one card: planner + multi-client test)
 The dashboard's top card lists every device on the LAN. Pick a client, a traffic type (Video, Spotify, Apple Music,
 Voice call, Teams, Zoom, Game), a quality level and the number of simultaneous streams. You get: required bitrate
 (avg/peak, up/down), data per hour, packets/s, usable capacity and headroom on that client's link, airtime needed,

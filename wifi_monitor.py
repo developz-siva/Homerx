@@ -1155,29 +1155,17 @@ th{color:var(--mut);font-weight:500}.mut{color:var(--mut)}.tag{display:inline-bl
 <div><button type=button onclick="connAct('test')">Test</button> <button type=button onclick="connAct('go')"><b>Connect</b></button> <button type=button onclick="disc()">Disconnect</button>
 <span id=cmsg class=mut style="margin-left:10px"></span></div>
 <p class=mut style="margin-bottom:0">Passwords are used for this session only and never saved. Other settings are remembered for next time.</p></div>
-<div class=card><h2>Traffic planner</h2>
-<div class=ctl><label>Client<select id=pc></select></label><label>or client IP<input id=pip placeholder="192.168.1.50" style="min-width:130px"></label><label>Traffic<select id=pt></select></label>
-<label>Quality<select id=pq></select></label><label>Simultaneous streams<input id=pn type=number min=1 max=20 value=1 style="min-width:80px"></label></div>
-<div id=pr class=mut>Select a client and a traffic type.</div>
-<div id=tp style="display:none;margin-top:14px;border-top:1px solid var(--line);padding-top:12px">
-<div class=ctl><label id=tdl>Duration (s)<input id=td type=number value=10 min=3 max=120 style="min-width:80px"></label>
-<label id=tsl>Parallel streams<input id=tsn type=number value=1 min=1 max=16 style="min-width:80px"></label>
-<label id=trl style="display:none">UDP target rate (Mbps)<input id=tr type=number value=50 min=0.1 step=any style="min-width:100px"></label>
-<label>&nbsp;<button id=tb style="font:inherit;padding:7px 16px;border-radius:6px;border:0;background:var(--a);color:#fff;cursor:pointer">Run test</button></label></div>
-<div id=tn class=mut style="margin-bottom:8px"></div><div id=tres></div></div></div>
-<div class=card id=mc><h2>Test several clients at the same time</h2>
-<div class=mut style="margin-bottom:8px">Give every client its own activity (audio, video, 4K, Teams call, game, IoT, or a plain iperf3 run) and assess them all together for the chosen time.
-<b>Watch real traffic</b> (default): start the real app on the device (Netflix on the TV, Spotify on the phone, a Teams call on the laptop...), then press Run all. Nothing is sent and nothing is installed on the client: the AP's own counters record what each client really did, and its link (signal, PHY rate, retries, airtime) is judged GOOD / MARGINAL / BAD against what that activity needs.
-<b>Generate with iperf3</b> is only for PCs that can run it (<code>iperf_client.py</code>); iperf3 throughput rows are extra load for the others. iperf rows need the agent (<code>--iperf-server</code>).</div>
+<div class=card id=mc><h2>Test clients</h2>
+<div class=mut style="margin-bottom:8px">One row per client: pick the client (or type its IP) and what it is doing, start that app on the device, then press <b>Run all</b>. For the chosen time the AP's own counters record what each client really did, and its link (signal, PHY rate, retries, airtime) is graded GOOD / MARGINAL / BAD against what that activity needs. Nothing is installed on the clients. <b>Plan</b> shows what a row needs and whether the client's link can carry it. With the iperf agent running (<code>--iperf-server</code>) extra "How / UDP" options appear for generating iperf3 load.</div>
 <div class=ctl><label>Quick fill (applies to the rows below)<select id=mpat></select></label>
 <label>&nbsp;<span><button id=mpapply>Apply to all rows</button> <button id=mall>Add all connected clients</button> <button id=madd>+ Add row</button> <button id=mclear>Clear</button></span></label>
 <label>Saved scenarios<select id=msl></select></label><label>Name<input id=msn placeholder="Evening mix" style="min-width:120px"></label>
 <label>&nbsp;<span><button id=msave>Save</button> <button id=mload>Load</button> <button id=mdel>Delete</button></span></label></div>
-<div style="max-height:460px;overflow:auto"><table id=mt><tr><th>Client</th><th>Doing</th><th>Quality / test</th><th>&times;</th><th>How</th><th>UDP Mbps</th><th></th></tr></table></div>
+<div style="max-height:460px;overflow:auto"><table id=mt><tr><th>Client</th><th>Doing</th><th>Quality / test</th><th>&times;</th><th class=iph>How</th><th class=iph>UDP Mbps</th><th></th></tr></table></div>
 <div class=ctl style="margin-top:10px"><label>Duration (s)<input id=md type=number value=15 min=5 max=120 style="min-width:80px"></label>
-<label>Demand (iperf rows)<select id=mdem><option value=target>Exactly what each needs</option><option value=max>Flat out (shows headroom)</option></select></label>
+<label class=iph>Demand (iperf rows)<select id=mdem><option value=target>Exactly what each needs</option><option value=max>Flat out (shows headroom)</option></select></label>
 <label>&nbsp;<span><button id=mrun style="font:inherit;padding:7px 16px;border-radius:6px;border:0;background:var(--a);color:#fff;cursor:pointer">Run all</button> <span id=mcount class=mut></span></span></label></div>
-<div id=mres></div></div>
+<div id=mres></div><div id=pr style="margin-top:12px"></div></div>
 <div class=grid id=radios></div><div class=card style="margin-top:14px"><h2>Traffic by class (Mbps)</h2><div id=cls></div></div>
 <div class=card><h2>Insights &amp; recommendations</h2><div id=ins></div></div>
 <div class=card><h2>Clients</h2><table id=t></table></div>
@@ -1227,12 +1215,11 @@ function row(w,i){return '<div style="padding:3px 0 3px 8px;border-left:3px soli
 let CAT=null,SIG='';const $=id=>document.getElementById(id);
 function fillClients(s){const all=[...s.clients.map(c=>({mac:c.mac,t:(c.host||c.mac)+' · '+(c.ips||[]).join(',')+' · Wi-Fi '+c.band+' '+c.rssi+' dBm'})),
 ...(s.lan||[]).map(l=>({mac:l.mac,t:(l.host||l.mac)+' · '+l.ips.join(',')+' · wired/other'}))];
-window.CL=all;const sig=JSON.stringify(all.map(a=>a.mac));if(sig===SIG)return;SIG=sig;const cur=$('pc').value;
-$('pc').innerHTML='<option value="">— select client —</option>'+all.map(a=>`<option value="${esc(a.mac)}">${esc(a.t)}</option>`).join('');$('pc').value=cur;mfill()}
-function fillQual(){const k=$('pt').value;if(!CAT||!k)return;const c=CAT[k];$('pq').innerHTML=c.qualities.map(q=>`<option ${q===c.default?'selected':''}>${esc(q)}</option>`).join('')}
+window.CL=all;const sig=JSON.stringify(all.map(a=>a.mac));if(sig===SIG)return;SIG=sig;mfill()}
 const T=(v,l)=>`<div class=tile><b>${v}</b><span>${l}</span></div>`;
-async function plan(){const mac=$('pc').value,t=$('pt').value;if(!mac||!t){$('pr').innerHTML='<span class=mut>Select a client and a traffic type.</span>';return}
-let r;try{r=await (await fetch(`api/plan?mac=${encodeURIComponent(mac)}&traffic=${t}&quality=${encodeURIComponent($('pq').value)}&n=${$('pn').value||1}`)).json()}catch(e){return}
+let PROW=null;
+async function plan(){const tr=PROW;if(!tr||!tr.isConnected){$('pr').innerHTML='';return}const mac=tr.querySelector('.mc').value,t=tr.querySelector('.mt').value;if(!mac||!CAT[t]||CAT[t].test){$('pr').innerHTML='<span class=mut>Pick a client and an activity, then press Plan on its row to see what it needs and whether its link can carry it.</span>';return}
+let r;try{r=await (await fetch(`api/plan?mac=${encodeURIComponent(mac)}&traffic=${t}&quality=${encodeURIComponent(tr.querySelector('.mq').value)}&n=${tr.querySelector('.mn').value||1}`)).json()}catch(e){return}
 if(r.error){$('pr').textContent=r.error;return}const q=r.required,l=r.link,c=r.capacity,g=r.targets;
 let h=`<div><span class="v ${r.verdict.level}">${r.test?'THROUGHPUT TEST':esc(r.verdict.level.toUpperCase())}</span> <b>${esc(r.traffic)}</b> — ${esc(r.quality)} ×${r.streams}<div class=mut style="margin-top:4px">${esc(r.verdict.text)}</div></div><div class=tiles>`+
 (r.test?'':T(q.down_mbps+' / '+q.up_mbps,'Required Mbps ↓ / ↑ (avg)')+T(q.peak_down_mbps+' / '+q.peak_up_mbps,'Peak Mbps ↓ / ↑')+T(q.gb_per_hour_down+' / '+q.gb_per_hour_up,'Data GB/hour ↓ / ↑')+T(q.pps,'Packets per second'));
@@ -1243,24 +1230,20 @@ h+='</div><div class=mut style="line-height:1.6"><b>QoS:</b> WMM '+esc(r.qos.wmm
 (r.insights||[]).forEach(i=>h+=row('',i));(r.notes||[]).forEach(n=>h+='<div class=mut style="margin-top:6px">ℹ '+esc(n)+'</div>');$('pr').innerHTML=h}
 let SRV=false;
 async function boot(){try{CAT=await (await fetch('api/catalog')).json();SRV=(await (await fetch('api/config')).json()).iperf_server}catch(e){return}
-$('pt').innerHTML='<option value="">— select traffic —</option>'+Object.entries(CAT).map(([k,v])=>`<option value="${k}">${esc(v.label)}</option>`).join('');
-$('pt').onchange=()=>{fillQual();testUI();plan()};$('pq').addEventListener('change',testUI);['pc','pq','pn'].forEach(i=>$(i).onchange=plan);$('pc').addEventListener('change',()=>{if($('pc').value)$('pip').value=''});$('tb').onclick=runTest;$('madd').onclick=()=>maddRow();$('mrun').onclick=mrun;$('mpapply').onclick=mapply;$('mall').onclick=mall;$('mclear').onclick=()=>msetRows([]);mpatInit();scenList();
+document.querySelectorAll('.iph').forEach(e=>e.style.display=SRV?'':'none');$('madd').onclick=()=>maddRow();$('mrun').onclick=mrun;$('mpapply').onclick=mapply;$('mall').onclick=mall;$('mclear').onclick=()=>msetRows([]);mpatInit();scenList();
 $('msave').onclick=()=>{const n=$('msn').value.trim();if(!n)return;const o=scen();o[n]=mrows();scenSave(o);scenList();$('msl').value=n};
-$('mload').onclick=()=>{const r=scen()[$('msl').value];if(r){msetRows(r);$('msn').value=$('msl').value}};$('mdel').onclick=()=>{const o=scen();delete o[$('msl').value];scenSave(o);scenList()};maddRow();maddRow();setInterval(tstat,1000)}
-function testUI(){const k=$('pt').value,c=CAT&&CAT[k];$('tp').style.display=c&&c.test?'block':'none';if(!c||!c.test)return;const m=c.modes[$('pq').value]||'',ip=c.test==='iperf3';
-$('tdl').style.display=ip?'':'none';$('tsl').style.display=ip?'':'none';$('trl').style.display=(ip&&m.startsWith('udp'))?'':'none';
-$('tn').textContent=ip&&SRV?"Server-PC mode: press Run test, then run the shown iperf3 command on the selected Wi-Fi client. Download = add -R. The result is tied to the client by its IP; link metrics are captured during the run.":ip?"Needs an iperf3 server on the selected client (run: iperf3 -s; phones have iperf3 apps) with port 5201 allowed. Download = host to client, upload = client to host. Link metrics are sampled about every 2 s while the test runs.":"Runs on the machine running this dashboard: it measures that machine's internet speed, not the selected client's."}
+$('mload').onclick=()=>{const r=scen()[$('msl').value];if(r){msetRows(r);$('msn').value=$('msl').value}};$('mdel').onclick=()=>{const o=scen();delete o[$('msl').value];scenSave(o);scenList()};maddRow();setInterval(tstat,1000)}
 
-function mtraffic(){return '<option value=idle>Idle \u2013 not in this test</option>'+Object.entries(CAT||{}).filter(([k,v])=>v.test!=='speedtest').map(([k,v])=>`<option value="${k}">${esc(v.label)}</option>`).join('')}
+function mtraffic(){return '<option value=idle>Idle \u2013 not in this test</option>'+Object.entries(CAT||{}).filter(([k,v])=>v.test!=='speedtest'&&(SRV||v.test!=='iperf3')).map(([k,v])=>`<option value="${k}">${esc(v.label)}</option>`).join('')}
 function mclients(){return '<option value="">— client —</option>'+(window.CL||[]).map(a=>`<option value="${esc(a.mac)}">${esc(a.t)}</option>`).join('')}
 function pickQ(k,re){const c=CAT[k];if(!c)return '';const q=c.qualities.find(x=>re&&new RegExp(re,'i').test(x));return q||c.default}
 function mcount(){const rs=[...document.querySelectorAll('#mt .mt')],n=rs.filter(s=>s.value!=='idle').length,i=rs.length-n;$('mcount').textContent=n+' client'+(n==1?'':'s')+' in this run'+(i?', '+i+' idle (skipped)':'')}
 function maddRow(p){if(!CAT)return;p=p||{};const tr=document.createElement('tr');
-tr.innerHTML=`<td><select class=mc>${mclients()}</select> <input class=mip placeholder="or IP" style="min-width:100px;width:110px"></td><td><select class=mt>${mtraffic()}</select></td><td><select class=mq></select></td><td><input class=mn type=number value=1 min=1 max=20 style="min-width:56px;width:56px"></td><td><select class=mm><option value=observe>Watch real traffic</option><option value=iperf>Generate with iperf3</option></select></td><td><input class=mr type=number value=50 min=0.1 step=any style="min-width:70px;width:70px"></td><td><button class=mx>&#10005;</button></td>`;
+tr.innerHTML=`<td><select class=mc>${mclients()}</select> <input class=mip placeholder="or IP" style="min-width:100px;width:110px"></td><td><select class=mt>${mtraffic()}</select></td><td><select class=mq></select></td><td><input class=mn type=number value=1 min=1 max=20 style="min-width:56px;width:56px"></td><td class=iph><select class=mm><option value=observe>Watch real traffic</option><option value=iperf>Generate with iperf3</option></select></td><td class=iph><input class=mr type=number value=50 min=0.1 step=any style="min-width:70px;width:70px"></td><td style="white-space:nowrap"><button class=mp title="What this needs, and can this client's link carry it?">Plan</button> <button class=mx title="Remove">&#10005;</button></td>`;
 const q=tr.querySelector('.mq'),t=tr.querySelector('.mt'),r=tr.querySelector('.mr'),fq=(sel)=>{const c=CAT[t.value];q.innerHTML=(c?c.qualities:[]).map(x=>`<option value="${esc(x)}">${esc(x)}</option>`).join('');q.value=sel&&c&&c.qualities.includes(sel)?sel:(c?c.default:'');ur()},
 ur=()=>{const c=CAT[t.value],mm=tr.querySelector('.mm'),idle=t.value==='idle';tr.style.opacity=idle?.5:1;[q,mm,r,tr.querySelector('.mn')].forEach(e=>{if(idle)e.disabled=true;else if(e!==mm)e.disabled=false});if(idle){r.style.visibility='hidden';return}if(c&&c.test==='iperf3'){mm.value='iperf';mm.disabled=true}else mm.disabled=false;r.style.visibility=(c&&c.test==='iperf3'&&/udp/i.test((c.modes||{})[q.value]||''))?'visible':'hidden'};
-t.onchange=()=>{fq();mcount()};q.onchange=ur;tr.querySelector('.mx').onclick=()=>{tr.remove();mcount()};
-document.getElementById('mt').appendChild(tr);if(p.mac)tr.querySelector('.mc').value=p.mac;if(p.ip)tr.querySelector('.mip').value=p.ip;t.value=(p.traffic&&(CAT[p.traffic]||p.traffic==='idle'))?p.traffic:(CAT.video?'video':t.options[1].value);fq(p.quality);if(p.streams)tr.querySelector('.mn').value=p.streams;if(p.method&&!tr.querySelector('.mm').disabled)tr.querySelector('.mm').value=p.method;if(p.rate)r.value=p.rate;mcount();return tr}
+t.onchange=()=>{fq();mcount()};q.onchange=ur;tr.querySelector('.mx').onclick=()=>{tr.remove();mcount()};tr.querySelector('.mp').onclick=()=>{PROW=tr;plan()};tr.addEventListener('change',()=>{if(PROW===tr)plan()});
+document.getElementById('mt').appendChild(tr);document.querySelectorAll('.iph').forEach(e=>e.style.display=SRV?'':'none');if(p.mac)tr.querySelector('.mc').value=p.mac;if(p.ip)tr.querySelector('.mip').value=p.ip;t.value=(p.traffic&&(CAT[p.traffic]||p.traffic==='idle'))?p.traffic:(CAT.video?'video':t.options[1].value);fq(p.quality);if(p.streams)tr.querySelector('.mn').value=p.streams;if(p.method&&!tr.querySelector('.mm').disabled)tr.querySelector('.mm').value=p.method;if(p.rate)r.value=p.rate;mcount();return tr}
 function mfill(){document.querySelectorAll('#mt .mc').forEach(s=>{const v=s.value;s.innerHTML=mclients();s.value=v})}
 function mrows(){return [...document.querySelectorAll('#mt tr')].slice(1).map(tr=>({mac:tr.querySelector('.mc').value,ip:tr.querySelector('.mip').value.trim(),traffic:tr.querySelector('.mt').value,quality:tr.querySelector('.mq').value,streams:+tr.querySelector('.mn').value,rate:+tr.querySelector('.mr').value,method:tr.querySelector('.mm').value}))}
 function msetRows(rows){document.querySelectorAll('#mt tr').forEach((tr,i)=>{if(i)tr.remove()});rows.forEach(maddRow);mcount()}
@@ -1275,7 +1258,7 @@ function scen(){try{return JSON.parse(localStorage.getItem('wm_scen')||'{}')}cat
 function scenSave(o){try{localStorage.setItem('wm_scen',JSON.stringify(o))}catch(e){}}
 function scenList(){$('msl').innerHTML=Object.keys(scen()).map(k=>`<option>${esc(k)}</option>`).join('')||'<option value="">(none saved)</option>'}
 async function mrun(){const b=$('mrun');if(b.dataset.cancel){await fetch('api/test/cancel',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});return}
-const items=mrows().filter(r=>r.traffic!=='idle').map(r=>({...r,mac:r.ip?'':r.mac}));
+const items=mrows().filter(r=>r.traffic!=='idle'&&(r.mac||r.ip)).map(r=>({...r,mac:r.ip?'':r.mac}));
 if(!items.length){$('mres').innerHTML='<div class=hot>Add at least one client that is not set to Idle.</div>';return}
 let r;try{r=await (await fetch('api/test/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({items,secs:+$('md').value,demand:$('mdem').value})})).json()}catch(e){$('mres').textContent='Could not start the tests.';return}
 if(r.error){$('mres').innerHTML='<div class=hot>\u2716 '+esc(r.error)+'</div>';return}$('mres').textContent='Starting\u2026';tstat()}
@@ -1296,21 +1279,7 @@ h+='</table>';const m=s.summary;
 if(m){h+=`<div style="margin-top:10px">${badge(m.grade)} <b>${m.good}</b> good, <b>${m.marginal}</b> marginal, <b>${m.bad}</b> bad`+(m.no_traffic?`, <b>${m.no_traffic}</b> with no traffic (app not started?)`:'')+((m.no_result-m.no_traffic)>0?`, <b>${m.no_result-m.no_traffic}</b> no result`:'')+(m.load_only?`, ${m.load_only} iperf load`:'')+` &middot; total ${m.measured_total} Mbps delivered, ${m.required_total} Mbps needed`+(m.overlap_s!=null?` &middot; ran together for ${m.overlap_s}s`:'')+(m.util_max?` &middot; radio up to ${m.util_max}% busy`:'')+'</div>'
 +(m.overlap_s!=null&&m.overlap_s<3?'<div class=hot>The tests barely overlapped - start the helpers on every client first, then press Run all.</div>':'')}
 $('mres').innerHTML=h}
-async function runTest(){const mac=$('pc').value,ip=$('pip').value.trim(),k=$('pt').value;if((!mac&&!ip)||!k){$('tres').textContent='Select a client, or type its IP.';return}
-if($('tb').dataset.cancel){await fetch('api/test/cancel',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});return}
-let r;try{r=await (await fetch('api/test/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mac:ip?'':mac,ip,traffic:k,quality:$('pq').value,secs:+$('td').value,streams:+$('tsn').value,rate:+$('tr').value})})).json()}catch(e){$('tres').textContent='Could not start the test.';return}
-if(r.error){$('tres').innerHTML='<div class=hot>✖ '+esc(r.error)+'</div>';return}$('tres').textContent='Starting…';tstat()}
-async function tstat(){let s;try{s=await (await fetch('api/test/status')).json()}catch(e){return}if(s.state==='idle')return;if(s.multi){mrender(s);return}const wait=s.state==='waiting',run=s.state==='running';$('tb').disabled=run;$('tb').textContent=run?`Running… ${s.elapsed}s`:wait?'Cancel':'Run test';if(wait)$('tb').dataset.cancel=1;else delete $('tb').dataset.cancel;
-if(wait){$('tres').innerHTML='<div class=hot style="color:inherit">⏳ <b>Armed — waiting for '+esc(s.ip)+'</b> ('+s.remaining+'s left). '+(s.claimed?'<b>The client helper picked it up and is running the test…</b> It would otherwise run:':'If the client runs iperf_client.py it starts by itself; otherwise run on that client:')+'<pre style="user-select:all;margin:6px 0">'+esc(s.cmd)+'</pre><span class=mut>Link metrics are being sampled ('+s.samples+' so far).'+(s.others&&s.others.length?' Ignored tests from '+esc(s.others.join(', '))+'.':'')+'</span></div>';return}
-if(s.state==='cancelled'){$('tres').innerHTML='<span class=mut>Cancelled.</span>';return}
-if(run){$('tres').innerHTML='<span class=mut>Test in progress. Sampling link metrics ('+s.samples+' so far)…</span>';return}renderTest(s)}
-function renderTest(s){const r=s.result||{};if(!r.ok){$('tres').innerHTML='<div class=hot>✖ '+esc(r.error||'failed')+'</div>';return}const L=r.link||{};let h='<div class=tiles>';
-if(r.mode==='speedtest')h+=T(r.down_mbps+' / '+r.up_mbps,'Internet ↓ / ↑ Mbps')+T((r.ping_ms??'–')+' ms','Ping')+T((r.jitter_ms??'–')+' ms','Jitter')+T(esc(r.server||'–'),'Server');
-else{h+=T(r.mbps+' Mbps','Measured '+((r.mode||s.mode).endsWith('up')?'upload (client to '+(s.server?'server PC':'host')+')':'download ('+(s.server?'server PC':'host')+' to client)'));
-if(r.retransmits!=null)h+=T(r.retransmits,'TCP retransmits');
-if(r.jitter_ms!=null)h+=T(r.jitter_ms+' ms','UDP jitter')+T(r.loss_pct+'%','UDP loss');if(r.min_mbps!=null)h+=T(r.min_mbps+' – '+r.max_mbps,'Per-second min – max Mbps')}
-if(L.n)h+=T(L.rssi_avg+' dBm','RSSI during test')+T((L.ap_tx_avg??'–')+' / '+(L.sta_tx_avg??'–'),'PHY Mbps AP→STA / STA→AP')+T((L.retry_avg??'–')+'% (max '+(L.retry_max??'–')+')','Tx retries during test')+T((L.util_avg??'–')+'% (max '+(L.util_max??'–')+')','Radio busy during test');
-h+='</div>';(r.insights||[]).forEach(i=>h+=row('',i));$('tres').innerHTML=h}
+async function tstat(){let s;try{s=await (await fetch('api/test/status')).json()}catch(e){return}if(s.state==='idle'||!s.multi)return;mrender(s)}
 const _t=tick;tick=async function(){await _t();try{const s=await (await fetch('api/state')).json();if(!s.ts)return;insights(s);fillClients(s);plan()}catch(e){}};
 boot();tick();setInterval(tick,3000);</script></body></html>"""
 
