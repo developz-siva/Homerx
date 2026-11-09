@@ -747,13 +747,18 @@ class Monitor:
         dn, up = avg("down") or 0.0, avg("up") or 0.0
         ser = sorted((x["down"] if t["required_dir"] == "down" else x["up"]) or 0 for x in S)
         got = dn if t["required_dir"] == "down" else up
-        return {"ok": True, "tool": "observe", "mode": "observe", "mbps": round(got, 2), "avg_down_mbps": round(dn, 2), "avg_up_mbps": round(up, 2),
+        mb = {"mb_down": 0.0, "mb_up": 0.0}
+        for a, b in zip(S, S[1:]):
+            dt = (b.get("t") or 0) - (a.get("t") or 0)
+            if 0 < dt < 60: mb["mb_down"] += (b.get("down") or 0) * dt / 8; mb["mb_up"] += (b.get("up") or 0) * dt / 8
+        mb = {k: round(v, 3) for k, v in mb.items()}
+        return {"ok": True, "tool": "observe", "mode": "observe", "samples": len(S), **mb, "mbps": round(got, 2), "avg_down_mbps": round(dn, 2), "avg_up_mbps": round(up, 2),
                 "peak_mbps": round(ser[min(len(ser) - 1, int(0.95 * len(ser)))], 2), "secs": t["secs"], "band": S[-1].get("band"), "iface": S[-1].get("iface")}
 
     def _observe_verdict(self, res, t):
         need, L = t["required"], res["link"]; dn, up = res["avg_down_mbps"], res["avg_up_mbps"]; got = res["mbps"]
         if (dn + up) < max(0.02, 0.05 * need):
-            return {"grade": "NO TRAFFIC", "required": need, "measured": got, "ratio": 0, "reasons": [f"Almost no traffic from this client ({dn + up:.2f} Mbps): start the {t['label']} on it before the window, otherwise it cannot be judged."]}
+            return {"grade": "NO TRAFFIC", "required": need, "measured": got, "ratio": 0, "reasons": [f"Almost no traffic from this client: {dn:.3f} down / {up:.3f} up Mbps on average over {res.get('samples', '?')} AP reading(s) in {t['secs']} s ({res.get('mb_down', 0):.2f} MB down, {res.get('mb_up', 0):.2f} MB up). Start the {t['label']} on it before the window; audio apps download a track in a short burst and then go quiet, so press Run all just as a NEW song starts (skip to the next track) and use a longer window."]}
         ratio = got / need; why = [f"Saw {dn:g} down / {up:g} up Mbps on the air against {need:g} Mbps needed ({ratio * 100:.0f}%)."]
         ap_tx, sta_tx, util = L.get("ap_tx_avg"), L.get("sta_tx_avg"), L.get("util_avg")
         own = (dn / ap_tx if ap_tx else 0) + (up / sta_tx if sta_tx else 0)          # this client's own share of airtime

@@ -77,7 +77,7 @@ class Observe(unittest.TestCase):
         self.assertEqual(st["summary"]["clients"], 3)
     def test_idle_client_is_no_traffic_not_bad(self):
         m = self.mon(); mac = m.be.cl[3][0]
-        v = m._observe_verdict({"ok": True, "avg_down_mbps": 0.0, "avg_up_mbps": 0.0, "mbps": 0.0, "link": {}}, {"required": 5.0, "required_dir": "down", "traffic": "video", "label": "Video", "quality": "1080p Full HD (5 Mbps)", "n": 1, "iface": None, "util_before": None})
+        v = m._observe_verdict({"ok": True, "avg_down_mbps": 0.0, "avg_up_mbps": 0.0, "mbps": 0.0, "link": {}}, {"required": 5.0, "required_dir": "down", "traffic": "video", "label": "Video", "secs": 15, "quality": "1080p Full HD (5 Mbps)", "n": 1, "iface": None, "util_before": None})
         self.assertEqual(v["grade"], "NO TRAFFIC")
     def test_validation_and_iperf_rows_still_need_agent(self):
         m = self.mon(); mac = m.be.cl[0][0]
