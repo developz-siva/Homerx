@@ -1243,16 +1243,16 @@ function testUI(){const k=$('pt').value,c=CAT&&CAT[k];$('tp').style.display=c&&c
 $('tdl').style.display=ip?'':'none';$('tsl').style.display=ip?'':'none';$('trl').style.display=(ip&&m.startsWith('udp'))?'':'none';
 $('tn').textContent=ip&&SRV?"Server-PC mode: press Run test, then run the shown iperf3 command on the selected Wi-Fi client. Download = add -R. The result is tied to the client by its IP; link metrics are captured during the run.":ip?"Needs an iperf3 server on the selected client (run: iperf3 -s; phones have iperf3 apps) with port 5201 allowed. Download = host to client, upload = client to host. Link metrics are sampled about every 2 s while the test runs.":"Runs on the machine running this dashboard: it measures that machine's internet speed, not the selected client's."}
 
-function mtraffic(){return Object.entries(CAT||{}).filter(([k,v])=>v.test!=='speedtest').map(([k,v])=>`<option value="${k}">${esc(v.label)}</option>`).join('')}
+function mtraffic(){return '<option value=idle>Idle \u2013 not in this test</option>'+Object.entries(CAT||{}).filter(([k,v])=>v.test!=='speedtest').map(([k,v])=>`<option value="${k}">${esc(v.label)}</option>`).join('')}
 function mclients(){return '<option value="">— client —</option>'+(window.CL||[]).map(a=>`<option value="${esc(a.mac)}">${esc(a.t)}</option>`).join('')}
 function pickQ(k,re){const c=CAT[k];if(!c)return '';const q=c.qualities.find(x=>re&&new RegExp(re,'i').test(x));return q||c.default}
-function mcount(){const n=document.querySelectorAll('#mt tr').length-1;$('mcount').textContent=n+' client'+(n==1?'':'s')+' in this run'}
+function mcount(){const rs=[...document.querySelectorAll('#mt .mt')],n=rs.filter(s=>s.value!=='idle').length,i=rs.length-n;$('mcount').textContent=n+' client'+(n==1?'':'s')+' in this run'+(i?', '+i+' idle (skipped)':'')}
 function maddRow(p){if(!CAT)return;p=p||{};const tr=document.createElement('tr');
 tr.innerHTML=`<td><select class=mc>${mclients()}</select> <input class=mip placeholder="or IP" style="min-width:100px;width:110px"></td><td><select class=mt>${mtraffic()}</select></td><td><select class=mq></select></td><td><input class=mn type=number value=1 min=1 max=20 style="min-width:56px;width:56px"></td><td><select class=mm><option value=observe>Watch real traffic</option><option value=iperf>Generate with iperf3</option></select></td><td><input class=mr type=number value=50 min=0.1 step=any style="min-width:70px;width:70px"></td><td><button class=mx>&#10005;</button></td>`;
-const q=tr.querySelector('.mq'),t=tr.querySelector('.mt'),r=tr.querySelector('.mr'),fq=(sel)=>{const c=CAT[t.value];q.innerHTML=(c?c.qualities:[]).map(x=>`<option value="${esc(x)}">${esc(x)}</option>`).join('');q.value=sel&&c.qualities.includes(sel)?sel:(c?c.default:'');ur()},
-ur=()=>{const c=CAT[t.value],mm=tr.querySelector('.mm');if(c&&c.test==='iperf3'){mm.value='iperf';mm.disabled=true}else mm.disabled=false;r.style.visibility=(c&&c.test==='iperf3'&&/udp/i.test((c.modes||{})[q.value]||''))?'visible':'hidden'};
-t.onchange=()=>fq();q.onchange=ur;tr.querySelector('.mx').onclick=()=>{tr.remove();mcount()};
-document.getElementById('mt').appendChild(tr);if(p.mac)tr.querySelector('.mc').value=p.mac;if(p.ip)tr.querySelector('.mip').value=p.ip;if(p.traffic&&CAT[p.traffic])t.value=p.traffic;fq(p.quality);if(p.streams)tr.querySelector('.mn').value=p.streams;if(p.method&&!tr.querySelector('.mm').disabled)tr.querySelector('.mm').value=p.method;if(p.rate)r.value=p.rate;mcount();return tr}
+const q=tr.querySelector('.mq'),t=tr.querySelector('.mt'),r=tr.querySelector('.mr'),fq=(sel)=>{const c=CAT[t.value];q.innerHTML=(c?c.qualities:[]).map(x=>`<option value="${esc(x)}">${esc(x)}</option>`).join('');q.value=sel&&c&&c.qualities.includes(sel)?sel:(c?c.default:'');ur()},
+ur=()=>{const c=CAT[t.value],mm=tr.querySelector('.mm'),idle=t.value==='idle';tr.style.opacity=idle?.5:1;[q,mm,r,tr.querySelector('.mn')].forEach(e=>{if(idle)e.disabled=true;else if(e!==mm)e.disabled=false});if(idle){r.style.visibility='hidden';return}if(c&&c.test==='iperf3'){mm.value='iperf';mm.disabled=true}else mm.disabled=false;r.style.visibility=(c&&c.test==='iperf3'&&/udp/i.test((c.modes||{})[q.value]||''))?'visible':'hidden'};
+t.onchange=()=>{fq();mcount()};q.onchange=ur;tr.querySelector('.mx').onclick=()=>{tr.remove();mcount()};
+document.getElementById('mt').appendChild(tr);if(p.mac)tr.querySelector('.mc').value=p.mac;if(p.ip)tr.querySelector('.mip').value=p.ip;t.value=(p.traffic&&(CAT[p.traffic]||p.traffic==='idle'))?p.traffic:(CAT.video?'video':t.options[1].value);fq(p.quality);if(p.streams)tr.querySelector('.mn').value=p.streams;if(p.method&&!tr.querySelector('.mm').disabled)tr.querySelector('.mm').value=p.method;if(p.rate)r.value=p.rate;mcount();return tr}
 function mfill(){document.querySelectorAll('#mt .mc').forEach(s=>{const v=s.value;s.innerHTML=mclients();s.value=v})}
 function mrows(){return [...document.querySelectorAll('#mt tr')].slice(1).map(tr=>({mac:tr.querySelector('.mc').value,ip:tr.querySelector('.mip').value.trim(),traffic:tr.querySelector('.mt').value,quality:tr.querySelector('.mq').value,streams:+tr.querySelector('.mn').value,rate:+tr.querySelector('.mr').value,method:tr.querySelector('.mm').value}))}
 function msetRows(rows){document.querySelectorAll('#mt tr').forEach((tr,i)=>{if(i)tr.remove()});rows.forEach(maddRow);mcount()}
@@ -1260,15 +1260,15 @@ const PAT={'Home mix: audio, video, 4K video, Teams call':[['spotify','Very High
 'Mix 2: audio, iperf, video, game':[['spotify','Very High'],['iperf3','TCP download'],['video','1080p'],['game','typical']],
 'Everyone streams 4K HDR video':[['video','Dolby']],'Everyone on a Teams video call':[['teams','recommended']],'Everyone runs iperf3 (TCP download)':[['iperf3','TCP download']]};
 function mpatInit(){$('mpat').innerHTML=Object.keys(PAT).map(k=>`<option>${esc(k)}</option>`).join('')}
-function mapply(){const p=PAT[$('mpat').value];if(!p)return;document.querySelectorAll('#mt tr').forEach((tr,i)=>{if(!i)return;const [k,re]=p[(i-1)%p.length],t=tr.querySelector('.mt');t.value=k;t.onchange();const q=tr.querySelector('.mq');q.value=pickQ(k,re);q.onchange()})}
+function mapply(){const p=PAT[$('mpat').value];if(!p)return;document.querySelectorAll('#mt tr').forEach((tr,i)=>{if(!i)return;const [k,re]=p[(i-1)%p.length],t=tr.querySelector('.mt');if(t.value==='idle')return;t.value=k;t.onchange();const q=tr.querySelector('.mq');q.value=pickQ(k,re);q.onchange()})}
 function mall(){const have=new Set(mrows().map(r=>r.mac));const rows=document.querySelectorAll('#mt tr');(window.CL||[]).filter(a=>!have.has(a.mac)).forEach(a=>maddRow({mac:a.mac,traffic:'video',quality:pickQ('video','720p')}));
 if(document.querySelectorAll('#mt tr').length>1)mapply()}
 function scen(){try{return JSON.parse(localStorage.getItem('wm_scen')||'{}')}catch(e){return {}}}
 function scenSave(o){try{localStorage.setItem('wm_scen',JSON.stringify(o))}catch(e){}}
 function scenList(){$('msl').innerHTML=Object.keys(scen()).map(k=>`<option>${esc(k)}</option>`).join('')||'<option value="">(none saved)</option>'}
 async function mrun(){const b=$('mrun');if(b.dataset.cancel){await fetch('api/test/cancel',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});return}
-const items=mrows().map(r=>({...r,mac:r.ip?'':r.mac}));
-if(!items.length){$('mres').innerHTML='<div class=hot>Add at least one client.</div>';return}
+const items=mrows().filter(r=>r.traffic!=='idle').map(r=>({...r,mac:r.ip?'':r.mac}));
+if(!items.length){$('mres').innerHTML='<div class=hot>Add at least one client that is not set to Idle.</div>';return}
 let r;try{r=await (await fetch('api/test/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({items,secs:+$('md').value,demand:$('mdem').value})})).json()}catch(e){$('mres').textContent='Could not start the tests.';return}
 if(r.error){$('mres').innerHTML='<div class=hot>\u2716 '+esc(r.error)+'</div>';return}$('mres').textContent='Starting\u2026';tstat()}
 const GC={GOOD:'#12b76a',MARGINAL:'#f79009',BAD:'#d92d20','NO TRAFFIC':'#667085'};
