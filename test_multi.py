@@ -55,6 +55,37 @@ class Verdict(unittest.TestCase):
         m = w._multi_summary([t("GOOD", 0, 10), t("MARGINAL", 1, 11)]); self.assertEqual((m["good"], m["marginal"], m["grade"], m["overlap_s"]), (1, 1, "MARGINAL", 9))
         m = w._multi_summary([t("GOOD", 0, 10), {"state": "error", "required": 10, "result": {"ok": False}}]); self.assertEqual((m["no_result"], m["grade"]), (1, "BAD"))
 
+class Observe(unittest.TestCase):
+    """Real-traffic mode: no iperf, no agent - the AP's per-client counters are recorded for the chosen time and graded."""
+    def mon(self):
+        be = w.SimBackend(w.Runner(None)); m = w.Monitor(be, 1, None); m.poll(); return m
+    def run_obs(self, m, items, secs=5):
+        r = m.start_multi({"items": items, "secs": secs}); self.assertTrue(r.get("ok"), r)
+        for _ in range(secs * 8 + 80):
+            m.poll(); m.test_status()
+            if all(t["state"] not in ("waiting", "running") for t in m.tests): break
+            time.sleep(0.25)
+        return r, m.test_status()
+    def test_observe_needs_no_agent_and_grades_each_client(self):
+        m = self.mon(); macs = [c[0] for c in m.be.cl]
+        items = [{"mac": macs[1], "traffic": "video", "quality": "1080p Full HD (5 Mbps)"}, {"mac": macs[0], "traffic": "teams"}, {"mac": macs[3], "traffic": "voice"}]
+        r, st = self.run_obs(m, items)
+        self.assertEqual((r["observing"], r["iperf"]), (3, 0)); self.assertEqual(st["state"], "done")
+        for x in st["tests"]:
+            self.assertEqual(x["tool"] if "tool" in x else "observe", "observe"); self.assertTrue(x["result"]["ok"], x["result"]); self.assertIn(x["result"]["verdict"]["grade"], ("GOOD", "MARGINAL", "BAD", "NO TRAFFIC"))
+        self.assertGreater(st["tests"][0]["result"]["avg_down_mbps"], 1)           # the simulated TV really pulls video
+        self.assertEqual(st["summary"]["clients"], 3)
+    def test_idle_client_is_no_traffic_not_bad(self):
+        m = self.mon(); mac = m.be.cl[3][0]
+        v = m._observe_verdict({"ok": True, "avg_down_mbps": 0.0, "avg_up_mbps": 0.0, "mbps": 0.0, "link": {}}, {"required": 5.0, "required_dir": "down", "traffic": "video", "label": "Video", "quality": "1080p Full HD (5 Mbps)", "n": 1, "iface": None, "util_before": None})
+        self.assertEqual(v["grade"], "NO TRAFFIC")
+    def test_validation_and_iperf_rows_still_need_agent(self):
+        m = self.mon(); mac = m.be.cl[0][0]
+        self.assertIn("agent", m.start_multi({"items": [{"mac": mac, "traffic": "video", "method": "iperf"}], "secs": 5})["error"])
+        self.assertIn("associated", " ".join(str(x) for x in [self._unassoc()]))
+    def _unassoc(self):
+        m = self.mon(); r = m._observe_result({"samples": [], "mac": "aa:bb:cc:dd:ee:ff", "secs": 5, "iface": None}); return r.get("error", r)
+
 @unittest.skipUnless(shutil.which("iperf3"), "iperf3 not installed")
 class Concurrent(unittest.TestCase):
     PORT = 5760
@@ -75,7 +106,8 @@ class Concurrent(unittest.TestCase):
         items = [{"ip": "127.0.0.2", "traffic": "video", "quality": "720p HD (3 Mbps)", "streams": 2},
                  {"ip": "127.0.0.3", "traffic": "teams", "quality": "1:1 video, recommended (≈1.6 Mbps)", "streams": 1},
                  {"ip": "127.0.0.4", "traffic": "voice", "quality": "G.711 (80 kbps)", "streams": 1}]
-        self.assertEqual(self.mon.start_multi({"items": items, "secs": 5, "demand": "target"}), {"ok": True, "count": 3})
+        items = [dict(i, method="iperf") for i in items]
+        self.assertEqual(self.mon.start_multi({"items": items, "secs": 5, "demand": "target"}), {"ok": True, "count": 3, "observing": 0, "iperf": 3})
         self.assertEqual([t["port"] for t in self.mon.tests], [self.PORT, self.PORT + 1, self.PORT + 2])
         self.assertAlmostEqual(self.mon.tests[0]["required"], 6.0); self.assertIn("-b 6M", self.mon.tests[0]["cmd"]); self.assertIn(f"-p {self.PORT}", self.mon.tests[0]["cmd"])
         out = {}; th = [threading.Thread(target=self.helper, args=(ip, out)) for ip in ("127.0.0.2", "127.0.0.3")]
@@ -92,10 +124,10 @@ class Concurrent(unittest.TestCase):
         self.assertFalse(c["result"]["ok"]); self.assertIn("127.0.0.4", c["result"]["error"])
         m = st["summary"]; self.assertEqual((m["good"], m["no_result"], m["grade"]), (2, 1, "BAD")); self.assertIsNotNone(m["overlap_s"]); self.assertGreater(m["overlap_s"], 2)
     def test_iperf_row_mixed_with_profiles_is_load_not_graded(self):
-        items = [{"ip": "127.0.0.2", "traffic": "spotify", "quality": "Very High (320 kbps)"},
+        items = [{"ip": "127.0.0.2", "traffic": "spotify", "quality": "Very High (320 kbps)", "method": "iperf"},
                  {"ip": "127.0.0.3", "traffic": "iperf3", "quality": s.MODES["tcp_down"], "streams": 2},
                  {"ip": "127.0.0.4", "traffic": "iperf3", "quality": s.MODES["udp_up"], "rate": 20}]
-        self.assertEqual(self.mon.start_multi({"items": items, "secs": 5}), {"ok": True, "count": 3})
+        self.assertEqual(self.mon.start_multi({"items": items, "secs": 5}), {"ok": True, "count": 3, "observing": 0, "iperf": 3})
         a, b, c = self.mon.tests
         self.assertIsNone(b["required"]); self.assertIn("-P 2", b["cmd"]); self.assertNotIn(" -b ", b["cmd"]); self.assertIn("-u -b 20M", c["cmd"]); self.assertIn("-b 0.32M", a["cmd"])
         out = {}; th = [threading.Thread(target=self.helper, args=(ip, out)) for ip in ("127.0.0.2", "127.0.0.3", "127.0.0.4")]
@@ -108,14 +140,14 @@ class Concurrent(unittest.TestCase):
         self.assertTrue(all(x["ok"] for x in r), r); self.assertEqual(r[0]["verdict"]["grade"], "GOOD"); self.assertIsNone(r[1]["verdict"]); self.assertIsNone(r[2]["verdict"])
         m = st["summary"]; self.assertEqual((m["good"], m["load_only"], m["no_result"], m["grade"], m["clients"]), (1, 2, 0, "GOOD", 3)); self.assertGreater(r[1]["mbps"], 100)
     def test_validation(self):
-        two = [{"ip": "127.0.0.2", "traffic": "video"}, {"ip": "127.0.0.2", "traffic": "video"}]
+        two = [{"ip": "127.0.0.2", "traffic": "video", "method": "iperf"}, {"ip": "127.0.0.2", "traffic": "video", "method": "iperf"}]
         self.assertIn("already in the list", self.mon.start_multi({"items": two})["error"])
         self.assertIn("what this client will be doing", self.mon.start_multi({"items": [{"ip": "127.0.0.2", "traffic": "speedtest"}]})["error"])
-        self.assertIn("valid IP", self.mon.start_multi({"items": [{"ip": "999.1.1.1", "traffic": "video"}]})["error"])
-        self.assertIn("--slots", self.mon.start_multi({"items": [{"ip": f"127.0.0.{i + 2}", "traffic": "video"} for i in range(4)]})["error"])
-        self.mon.iperf_server = None; self.assertIn("iperf agent", self.mon.start_multi({"items": [{"ip": "127.0.0.2", "traffic": "video"}]})["error"])
+        self.assertIn("valid IP", self.mon.start_multi({"items": [{"ip": "999.1.1.1", "traffic": "video", "method": "iperf"}]})["error"])
+        self.assertIn("--slots", self.mon.start_multi({"items": [{"ip": f"127.0.0.{i + 2}", "traffic": "video", "method": "iperf"} for i in range(4)]})["error"])
+        self.mon.iperf_server = None; self.assertIn("iperf agent", self.mon.start_multi({"items": [{"ip": "127.0.0.2", "traffic": "video", "method": "iperf"}]})["error"])
     def test_cancel_cancels_every_armed_test(self):
-        self.mon.start_multi({"items": [{"ip": "127.0.0.2", "traffic": "video"}, {"ip": "127.0.0.3", "traffic": "video"}], "secs": 5})
+        self.mon.start_multi({"items": [{"ip": "127.0.0.2", "traffic": "video", "method": "iperf"}, {"ip": "127.0.0.3", "traffic": "video", "method": "iperf"}], "secs": 5})
         self.assertEqual(self.mon.cancel_test(), {"ok": True}); self.assertTrue(wait_state(self.mon, ("cancelled",), 5))
         time.sleep(1.5); self.assertEqual({t["state"] for t in self.mon.tests}, {"cancelled"})
 

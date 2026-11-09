@@ -97,6 +97,13 @@ iperf3 rows have no requirement to judge: they are extra load, and the other cli
   UDP loss/jitter are only measurable for uploads (client to server); downloads are judged on delivered Mbps.
 - A summary line shows how many were good / marginal / bad, the total measured vs needed, and how busy the radio got.
 
+### Watch real traffic (default) vs generate with iperf3
+Each row has a **How** choice. **Watch real traffic** (default for audio / video / call / game / IoT rows) sends nothing and installs nothing on the client:
+start the real app on the device (Netflix on the TV, Spotify on the phone, a Teams call on the laptop), press **Run all**, and for the chosen time the dashboard
+records each client's own AP counters (bytes, PHY rate, signal, retries, airtime) and grades it GOOD / MARGINAL / BAD against what that activity needs.
+A client that moved almost nothing is shown as grey **NO TRAFFIC** (app not started?) instead of BAD. Nothing can be forced onto a phone or TV without software,
+so the traffic has to be real. **Generate with iperf3** is only for PCs that can run `iperf_client.py`; iperf3 throughput rows are extra load and need `--iperf-server`.
+
 ## Reaching the AP: SSH, telnet, serial console, or web API (--transport)
 All backends (iw / wl / qca) work over any transport.
 
