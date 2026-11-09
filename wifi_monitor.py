@@ -16,8 +16,9 @@ Traffic per client + app/QoS class comes from conntrack byte counters (needs nf_
 import argparse, csv, json, os, random, re, shlex, socket, subprocess, sys, threading, time
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-import discovery, memwatch, planner, report, speedtools
+import capture, discovery, memwatch, planner, report, speedtools
 from transport import Runner, SerialRunner, SshPasswordRunner, TelnetRunner, UbusHttpRunner
+import urllib.parse
 from urllib.parse import urlparse, parse_qs
 from advisor import advise, advise_radio, resolve_type, norm_type, PROFILES
 
@@ -452,6 +453,7 @@ class Monitor:
         self.types, self.offset = {k.lower(): v for k, v in (types or {}).items()}, offset
         self.rssi_hist, self.mix_hist = {}, {}
         self.prev_surv, self.prev_flow, self.prev_sta, self.prev_bytes = {}, None, {}, {}
+        self.cap = {"state": "idle"}
         self.last_t = None
         self.test, self.tests, self.iperf_from, self.allow_remote_tests, self.iperf_port = None, [], "host", False, 5201
         self.iperf_src, self.bind_client, self.iperf_bin = None, True, None      # iperf_src: -B for tests run from the dashboard; bind_client: put -B <client IP> in the client command
@@ -875,6 +877,27 @@ class Monitor:
         return {"state": agg, "multi": True, "tests": rows, "summary": _multi_summary(self.tests) if agg == "done" else None,
                 "remaining": max([r.get("remaining") or 0 for r in rows] or [0])}
 
+    def start_capture(self, path, name, remove=True):
+        """Analyse an uploaded pcap / pcapng in the background (see capture.py). One at a time; progress via capture_status()."""
+        if self.cap.get("state") == "analysing": return {"error": "A capture is already being analysed."}
+        self.cap = {"state": "analysing", "name": name, "frames": 0, "started": time.time()}
+        def run():
+            try:
+                self.cap["result"] = capture.analyse_file(path, name, progress=lambda n: self.cap.update(frames=n))
+                self.cap["state"] = "done"
+            except Exception as e:
+                self.cap["state"], self.cap["error"] = "error", ("This does not look like a pcap / pcapng capture file." if isinstance(e, ValueError) else f"Could not analyse the capture: {e}")
+            finally:
+                if remove:
+                    try: os.remove(path)
+                    except OSError: pass
+        threading.Thread(target=run, daemon=True).start()
+        return {"ok": True}
+
+    def capture_status(self):
+        c = dict(self.cap); c["frames"] = c.get("frames") or (c.get("result") or {}).get("frames", 0)
+        return c
+
     def pending_for(self, ip, ident=None):
         """What an iperf_client.py helper should do now. Matched on the requester's source IP, or on the Wi-Fi IP it states itself
         (`ident`) when it reaches the dashboard over another network (e.g. a management address)."""
@@ -1156,6 +1179,10 @@ th{color:var(--mut);font-weight:500}.mut{color:var(--mut)}.tag{display:inline-bl
 <div><button type=button onclick="connAct('test')">Test</button> <button type=button onclick="connAct('go')"><b>Connect</b></button> <button type=button onclick="disc()">Disconnect</button>
 <span id=cmsg class=mut style="margin-left:10px"></span></div>
 <p class=mut style="margin-bottom:0">Passwords are used for this session only and never saved. Other settings are remembered for next time.</p></div>
+<div class=card id=cap><h2>Capture analysis (Wi-Fi sniffer pcap)</h2>
+<div class=mut style="margin-bottom:8px">Load a monitor-mode capture (<code>.pcap</code> / <code>.pcapng</code>, radiotap or raw 802.11) from your sniffer or from the AP (<code>wl monitor 1</code> + tcpdump). It shows, per client, which WMM queue (VO / VI / BE / BK) the frames really used, retries, PHY rates and estimated airtime; the AP's WMM / EDCA settings; and Wi-Fi 7 Multi-Link (MLO) details. The file is analysed on this machine and not kept. Encrypted payloads are not decrypted, so DSCP and the app are not visible.</div>
+<div class=ctl><label>Capture file<input id=capf type=file accept=".pcap,.pcapng,.cap,.gz" style="min-width:260px"></label><label>&nbsp;<button id=capgo>Analyse</button></label><span id=capmsg class=mut></span></div>
+<div id=capres></div></div>
 <div class=card id=mc><h2>Test clients</h2>
 <div class=mut style="margin-bottom:8px">One row per client: pick the client (or type its IP) and what it is doing, start that app on the device, then press <b>Run all</b>. For the chosen time the AP's own counters record what each client really did, and its link (signal, PHY rate, retries, airtime) is graded GOOD / MARGINAL / BAD against what that activity needs. Nothing is installed on the clients. <b>Plan</b> shows what a row needs and whether the client's link can carry it. Rows set to <b>iperf3 throughput</b> (or <b>Generate with iperf3</b>) need the iperf agent (<code>--iperf-server</code>) and generate load instead of watching.</div>
 <div class=ctl><label>Quick fill (applies to the rows below)<select id=mpat></select></label>
@@ -1229,9 +1256,26 @@ T((c.radio_util_now_pct??'n/a')+'% → '+c.projected_radio_util_pct+'%','Radio b
 if(l&&l.rssi!=null)h+=T(l.rssi+' dBm'+(g.rssi_margin_db!=null?` (${g.rssi_margin_db>=0?'+':''}${g.rssi_margin_db} dB)`:''),'RSSI (margin vs '+g.min_rssi+' dBm needed)')+T((l.ap_tx_phy_mbps??'–')+' / '+(l.sta_tx_phy_mbps??'–'),'PHY Mbps AP→STA / STA→AP')+T((l.retry_pct??'–')+'%','Tx retries')+T(esc(l.band)+' ch '+esc(l.channel??'?'),'Band / channel');
 h+='</div><div class=mut style="line-height:1.6"><b>QoS:</b> WMM '+esc(r.qos.wmm_ac)+' · DSCP '+esc(r.qos.dscp)+' · '+esc(r.qos.ports)+'<br><b>Targets:</b> '+esc(g.summary)+'</div>';
 (r.insights||[]).forEach(i=>h+=row('',i));(r.notes||[]).forEach(n=>h+='<div class=mut style="margin-top:6px">ℹ '+esc(n)+'</div>');$('pr').innerHTML=h}
+
+const QC={VO:'#d92d20',VI:'#f79009',BE:'#2a6fdb',BK:'#98a2b3'};
+function qbar(ac){const w=150;return '<span style="display:inline-flex;width:'+w+'px;height:10px;border-radius:3px;overflow:hidden;background:var(--line);vertical-align:middle">'+['VO','VI','BE','BK'].map(k=>`<span title="${k} ${ac[k].share_pct}%" style="width:${ac[k].share_pct}%;background:${QC[k]}"></span>`).join('')+'</span> <span class=mut style="font-size:11px">'+['VO','VI','BE','BK'].filter(k=>ac[k].share_pct>=0.5).map(k=>k+' '+ac[k].share_pct+'%').join(' · ')+'</span>'}
+function capRender(r){let h='<div class=tiles>'+T(r.frames.toLocaleString(),'Frames')+T(r.duration_s+' s','Duration')+T(r.clients.length,'Clients seen')+T(r.aps.length,'APs seen')+T(r.totals.data_retry_pct+'%','Data frames retried')+T(Object.keys(r.freqs).map(f=>f).slice(0,3).join(', ')||'–','Channel freq (MHz)')+'</div>';
+h+='<h3 style="margin:14px 0 6px">Findings</h3>'+r.insights.map(i=>row('',i)).join('');
+if(r.aps.length){h+='<h3 style="margin:14px 0 6px">Access points (from beacons)</h3><table><tr><th>SSID<th>BSSID<th>Band / ch<th>Generation<th>WMM / EDCA (AIFSN, CWmin-CWmax)<th>MLO</tr>'+r.aps.map(a=>`<tr><td>${esc(a.ssid||'(hidden)')}<td>${esc(a.bssid)}<td>${esc(a.band||'?')} ${esc(a.channel??'')}<td>${esc(a.generation)}<td>${a.wmm?(a.edca?['VO','VI','BE','BK'].filter(k=>a.edca[k]).map(k=>k+' '+a.edca[k].aifsn+', '+a.edca[k].cwmin+'-'+a.edca[k].cwmax).join(' · '):'on'):'<span class=hot>off</span>'}<td>${a.mlo?'MLD '+esc(a.mlo.mld_mac||'')+(a.mlo.links>1?' · '+a.mlo.links+' links':'')+(a.mlo.emlsr?' · EMLSR':'')+(a.mlo.ttlm?' · TTLM '+esc(a.mlo.ttlm):''):'–'}</tr>`).join('')+'</table>'}
+if(r.clients.length){h+='<h3 style="margin:14px 0 6px">Clients</h3><div style="overflow:auto"><table><tr><th>Client<th>Frames ↓/↑<th>Mbps ↓/↑<th>Retries<th>RSSI<th>Airtime (est.)<th>WMM queues used<th>Main PHY rate<th>Wi-Fi 7</tr>'+r.clients.map(c=>`<tr><td>${esc(c.mac)}${c.generation?'<div class=mut>'+esc(c.generation)+'</div>':''}<td>${c.frames_dn} / ${c.frames_up}<td>${c.mbps_dn} / ${c.mbps_up}<td>${c.retry_pct}%<td>${c.rssi_avg??'–'}<td>${c.airtime_est_pct}%<td>${qbar(c.ac)}<td>${c.phy.length?esc(c.phy[0].rate):'–'}<td>${c.mlo&&c.mlo.mld_mac?'MLO'+(c.mlo.emlsr?' EMLSR':'')+(c.mlo.max_links?' ≤'+c.mlo.max_links+' links':''):'–'}</tr>`).join('')+'</table></div>'}
+$('capres').innerHTML=h}
+async function capPoll(){let s;try{s=await (await fetch('api/capture/status')).json()}catch(e){return}
+if(s.state==='analysing'){$('capmsg').textContent='Analysing '+s.name+' ... '+(s.frames||0).toLocaleString()+' frames';setTimeout(capPoll,700);return}
+$('capgo').disabled=false;if(s.state==='error'){$('capmsg').textContent='';$('capres').innerHTML='<div class=hot>\u2716 '+esc(s.error)+'</div>';return}
+if(s.state==='done'){$('capmsg').textContent=s.name+' analysed.';capRender(s.result)}}
+async function capGo(){const f=$('capf').files[0];if(!f){$('capmsg').textContent='Choose a capture file first.';return}
+$('capgo').disabled=true;$('capres').innerHTML='';$('capmsg').textContent='Uploading '+f.name+' ('+Math.round(f.size/1048576)+' MB)...';
+try{const r=await (await fetch('api/capture',{method:'POST',headers:{'Content-Type':'application/octet-stream','X-Filename':encodeURIComponent(f.name)},body:f})).json();
+if(r.error){$('capgo').disabled=false;$('capmsg').textContent='';$('capres').innerHTML='<div class=hot>\u2716 '+esc(r.error)+'</div>';return}}catch(e){$('capgo').disabled=false;$('capmsg').textContent='Upload failed.';return}
+capPoll()}
 let SRV=false;
 async function boot(){try{CAT=await (await fetch('api/catalog')).json();SRV=(await (await fetch('api/config')).json()).iperf_server}catch(e){return}
-$('madd').onclick=()=>maddRow();$('mrun').onclick=mrun;$('mpapply').onclick=mapply;$('mall').onclick=mall;$('mclear').onclick=()=>msetRows([]);mpatInit();scenList();
+$('capgo').onclick=capGo;$('madd').onclick=()=>maddRow();$('mrun').onclick=mrun;$('mpapply').onclick=mapply;$('mall').onclick=mall;$('mclear').onclick=()=>msetRows([]);mpatInit();scenList();
 $('msave').onclick=()=>{const n=$('msn').value.trim();if(!n)return;const o=scen();o[n]=mrows();scenSave(o);scenList();$('msl').value=n};
 $('mload').onclick=()=>{const r=scen()[$('msl').value];if(r){msetRows(r);$('msn').value=$('msl').value}};$('mdel').onclick=()=>{const o=scen();delete o[$('msl').value];scenSave(o);scenList()};maddRow();setInterval(tstat,1000)}
 
@@ -1311,6 +1355,7 @@ def serve(mon, bind, port):
                     body, ct = report.build_report(st, mon.state), "application/pdf"
                     self.send_response(200); self.send_header("Content-Type", ct); self.send_header("Content-Length", str(len(body)))
                     self.send_header("Content-Disposition", 'attachment; filename="wifi-assessment-%s.pdf"' % time.strftime("%Y%m%d-%H%M")); self.end_headers(); self.wfile.write(body); return
+            elif u.path == "/api/capture/status": body, ct = json.dumps(mon.capture_status()).encode(), "application/json"
             elif u.path == "/api/test/status": body, ct = json.dumps(mon.test_status()).encode(), "application/json"
             elif u.path.startswith("/api/state"): body, ct = mon.snapshot().encode(), "application/json"
             elif self.path in ("/", "/index.html"): body, ct = HTML.encode(), "text/html; charset=utf-8"
@@ -1319,6 +1364,23 @@ def serve(mon, bind, port):
             self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
         def do_POST(self):
             u = urlparse(self.path)
+            if u.path == "/api/capture":                                      # raw pcap upload (this machine only)
+                if self.client_address[0] not in ("127.0.0.1", "::1"): self.send_error(403, "captures can only be loaded from this machine"); return
+                try: n = int(self.headers.get("Content-Length") or 0)
+                except ValueError: n = 0
+                if not 0 < n <= 2 << 30: self.send_error(413, "empty or too large (max 2 GB)"); return
+                import tempfile
+                fd, tmp = tempfile.mkstemp(suffix=".cap", dir=mon.log_dir if mon.log_dir and os.path.isdir(mon.log_dir) else None)
+                with os.fdopen(fd, "wb") as fh:
+                    left = n
+                    while left > 0:
+                        b = self.rfile.read(min(1 << 20, left))
+                        if not b: break
+                        fh.write(b); left -= len(b)
+                name = os.path.basename(urllib.parse.unquote(self.headers.get("X-Filename") or "capture"))[:120]
+                body = json.dumps(mon.start_capture(tmp, name) if left == 0 else {"error": "Upload was interrupted."}).encode()
+                if left: os.remove(tmp)
+                self.send_response(200); self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body); return
             if u.path.startswith("/api/connect") or u.path == "/api/disconnect":      # carries device passwords: this machine only, never remote
                 if self.client_address[0] not in ("127.0.0.1", "::1"): self.send_error(403, "the connection can only be changed from this machine"); return
             elif self.client_address[0] not in ("127.0.0.1", "::1") and not mon.allow_remote_tests: self.send_error(403, "tests can only be started from this machine (see --allow-remote-tests)"); return

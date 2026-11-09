@@ -108,6 +108,12 @@ records each client's own AP counters (bytes, PHY rate, signal, retries, airtime
 A client that moved almost nothing is shown as grey **NO TRAFFIC** (app not started?) instead of BAD. Nothing can be forced onto a phone or TV without software,
 so the traffic has to be real. **Generate with iperf3** is only for PCs that can run `iperf_client.py`; iperf3 throughput rows are extra load and need `--iperf-server`.
 
+## Capture analysis (Wi-Fi sniffer pcap)
+The **Capture analysis** card loads a monitor-mode `.pcap` / `.pcapng` (radiotap or raw 802.11; from a sniffer or from the AP with `wl monitor 1` + `tcpdump`) and shows:
+per client the WMM queue (VO / VI / BE / BK) the frames really used, retries, PHY rate and estimated airtime; the AP's WMM / EDCA parameters from its beacons; and Wi-Fi 7 Multi-Link (MLO) details
+(MLD address, EMLSR / EMLMR, max links, TID-to-link mapping). Findings flag things like voice retried a lot, no VO / VI use, WMM off, legacy rates, heavy airtime users and repeated roaming.
+Limits: encrypted payloads are not decrypted (no DSCP or app), a single sniffer hears one channel (use one per MLO link), and airtime is an estimate. Run `python capture.py file.pcapng` for the same result as JSON.
+
 ## Reaching the AP: SSH, telnet, serial console, or web API (--transport)
 All backends (iw / wl / qca) work over any transport.
 
