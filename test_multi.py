@@ -55,6 +55,18 @@ class Verdict(unittest.TestCase):
         m = w._multi_summary([t("GOOD", 0, 10), t("MARGINAL", 1, 11)]); self.assertEqual((m["good"], m["marginal"], m["grade"], m["overlap_s"]), (1, 1, "MARGINAL", 9))
         m = w._multi_summary([t("GOOD", 0, 10), {"state": "error", "required": 10, "result": {"ok": False}}]); self.assertEqual((m["no_result"], m["grade"]), (1, "BAD"))
 
+class ObserveReport(unittest.TestCase):
+    def test_single_row_is_multi_status_and_pdf_report(self):
+        import report
+        be = w.SimBackend(w.Runner(None)); m = w.Monitor(be, 1, None); m.poll()
+        self.assertTrue(m.start_multi({"items": [{"mac": be.cl[1][0], "traffic": "video", "quality": "1080p Full HD (5 Mbps)"}], "secs": 5})["ok"])
+        for _ in range(80):
+            m.poll(); st = m.test_status()
+            if st["state"] == "done": break
+            time.sleep(0.25)
+        self.assertTrue(st["multi"]); self.assertEqual(st["state"], "done")
+        pdf = report.build_report(st, m.state, "demo"); self.assertTrue(pdf.startswith(b"%PDF")); self.assertGreater(len(pdf), 1500)
+
 class Observe(unittest.TestCase):
     """Real-traffic mode: no iperf, no agent - the AP's per-client counters are recorded for the chosen time and graded."""
     def mon(self):

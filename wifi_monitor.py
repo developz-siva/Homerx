@@ -16,7 +16,7 @@ Traffic per client + app/QoS class comes from conntrack byte counters (needs nf_
 import argparse, csv, json, os, random, re, shlex, socket, subprocess, sys, threading, time
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-import discovery, memwatch, planner, speedtools
+import discovery, memwatch, planner, report, speedtools
 from transport import Runner, SerialRunner, SshPasswordRunner, TelnetRunner, UbusHttpRunner
 from urllib.parse import urlparse, parse_qs
 from advisor import advise, advise_radio, resolve_type, norm_type, PROFILES
@@ -722,6 +722,7 @@ class Monitor:
                 t["bind"] = ip if self.bind_client else None
                 t["cmd"] = speedtools.client_cmd(sip, t["port"], mode, secs, streams, rate, t["bind"], tcp_rate); gi += 1
             tests.append(t)
+        for t in tests: t["multi"] = True
         self.test, self.tests = tests[0], tests
         gate = [t for t in tests if t["tool"] == "iperf3"]
         for t in tests:
@@ -867,7 +868,7 @@ class Monitor:
 
     def test_status(self):
         if not self.tests: return {"state": "idle"}
-        if len(self.tests) == 1: return self._one_status(self.tests[0])
+        if len(self.tests) == 1 and not self.tests[0].get("multi"): return self._one_status(self.tests[0])
         rows = [self._one_status(t) for t in self.tests]
         states = [t["state"] for t in self.tests]
         agg = "waiting" if "waiting" in states else "running" if "running" in states else "done"
@@ -1156,7 +1157,7 @@ th{color:var(--mut);font-weight:500}.mut{color:var(--mut)}.tag{display:inline-bl
 <span id=cmsg class=mut style="margin-left:10px"></span></div>
 <p class=mut style="margin-bottom:0">Passwords are used for this session only and never saved. Other settings are remembered for next time.</p></div>
 <div class=card id=mc><h2>Test clients</h2>
-<div class=mut style="margin-bottom:8px">One row per client: pick the client (or type its IP) and what it is doing, start that app on the device, then press <b>Run all</b>. For the chosen time the AP's own counters record what each client really did, and its link (signal, PHY rate, retries, airtime) is graded GOOD / MARGINAL / BAD against what that activity needs. Nothing is installed on the clients. <b>Plan</b> shows what a row needs and whether the client's link can carry it. With the iperf agent running (<code>--iperf-server</code>) extra "How / UDP" options appear for generating iperf3 load.</div>
+<div class=mut style="margin-bottom:8px">One row per client: pick the client (or type its IP) and what it is doing, start that app on the device, then press <b>Run all</b>. For the chosen time the AP's own counters record what each client really did, and its link (signal, PHY rate, retries, airtime) is graded GOOD / MARGINAL / BAD against what that activity needs. Nothing is installed on the clients. <b>Plan</b> shows what a row needs and whether the client's link can carry it. Rows set to <b>iperf3 throughput</b> (or <b>Generate with iperf3</b>) need the iperf agent (<code>--iperf-server</code>) and generate load instead of watching.</div>
 <div class=ctl><label>Quick fill (applies to the rows below)<select id=mpat></select></label>
 <label>&nbsp;<span><button id=mpapply>Apply to all rows</button> <button id=mall>Add all connected clients</button> <button id=madd>+ Add row</button> <button id=mclear>Clear</button></span></label>
 <label>Saved scenarios<select id=msl></select></label><label>Name<input id=msn placeholder="Evening mix" style="min-width:120px"></label>
@@ -1230,11 +1231,11 @@ h+='</div><div class=mut style="line-height:1.6"><b>QoS:</b> WMM '+esc(r.qos.wmm
 (r.insights||[]).forEach(i=>h+=row('',i));(r.notes||[]).forEach(n=>h+='<div class=mut style="margin-top:6px">ℹ '+esc(n)+'</div>');$('pr').innerHTML=h}
 let SRV=false;
 async function boot(){try{CAT=await (await fetch('api/catalog')).json();SRV=(await (await fetch('api/config')).json()).iperf_server}catch(e){return}
-document.querySelectorAll('.iph').forEach(e=>e.style.display=SRV?'':'none');$('madd').onclick=()=>maddRow();$('mrun').onclick=mrun;$('mpapply').onclick=mapply;$('mall').onclick=mall;$('mclear').onclick=()=>msetRows([]);mpatInit();scenList();
+$('madd').onclick=()=>maddRow();$('mrun').onclick=mrun;$('mpapply').onclick=mapply;$('mall').onclick=mall;$('mclear').onclick=()=>msetRows([]);mpatInit();scenList();
 $('msave').onclick=()=>{const n=$('msn').value.trim();if(!n)return;const o=scen();o[n]=mrows();scenSave(o);scenList();$('msl').value=n};
 $('mload').onclick=()=>{const r=scen()[$('msl').value];if(r){msetRows(r);$('msn').value=$('msl').value}};$('mdel').onclick=()=>{const o=scen();delete o[$('msl').value];scenSave(o);scenList()};maddRow();setInterval(tstat,1000)}
 
-function mtraffic(){return '<option value=idle>Idle \u2013 not in this test</option>'+Object.entries(CAT||{}).filter(([k,v])=>v.test!=='speedtest'&&(SRV||v.test!=='iperf3')).map(([k,v])=>`<option value="${k}">${esc(v.label)}</option>`).join('')}
+function mtraffic(){return '<option value=idle>Idle \u2013 not in this test</option>'+Object.entries(CAT||{}).filter(([k,v])=>v.test!=='speedtest').map(([k,v])=>`<option value="${k}">${esc(v.label)}</option>`).join('')}
 function mclients(){return '<option value="">— client —</option>'+(window.CL||[]).map(a=>`<option value="${esc(a.mac)}">${esc(a.t)}</option>`).join('')}
 function pickQ(k,re){const c=CAT[k];if(!c)return '';const q=c.qualities.find(x=>re&&new RegExp(re,'i').test(x));return q||c.default}
 function mcount(){const rs=[...document.querySelectorAll('#mt .mt')],n=rs.filter(s=>s.value!=='idle').length,i=rs.length-n;$('mcount').textContent=n+' client'+(n==1?'':'s')+' in this run'+(i?', '+i+' idle (skipped)':'')}
@@ -1243,7 +1244,7 @@ tr.innerHTML=`<td><select class=mc>${mclients()}</select> <input class=mip place
 const q=tr.querySelector('.mq'),t=tr.querySelector('.mt'),r=tr.querySelector('.mr'),fq=(sel)=>{const c=CAT[t.value];q.innerHTML=(c?c.qualities:[]).map(x=>`<option value="${esc(x)}">${esc(x)}</option>`).join('');q.value=sel&&c&&c.qualities.includes(sel)?sel:(c?c.default:'');ur()},
 ur=()=>{const c=CAT[t.value],mm=tr.querySelector('.mm'),idle=t.value==='idle';tr.style.opacity=idle?.5:1;[q,mm,r,tr.querySelector('.mn')].forEach(e=>{if(idle)e.disabled=true;else if(e!==mm)e.disabled=false});if(idle){r.style.visibility='hidden';return}if(c&&c.test==='iperf3'){mm.value='iperf';mm.disabled=true}else mm.disabled=false;r.style.visibility=(c&&c.test==='iperf3'&&/udp/i.test((c.modes||{})[q.value]||''))?'visible':'hidden'};
 t.onchange=()=>{fq();mcount()};q.onchange=ur;tr.querySelector('.mx').onclick=()=>{tr.remove();mcount()};tr.querySelector('.mp').onclick=()=>{PROW=tr;plan()};tr.addEventListener('change',()=>{if(PROW===tr)plan()});
-document.getElementById('mt').appendChild(tr);document.querySelectorAll('.iph').forEach(e=>e.style.display=SRV?'':'none');if(p.mac)tr.querySelector('.mc').value=p.mac;if(p.ip)tr.querySelector('.mip').value=p.ip;t.value=(p.traffic&&(CAT[p.traffic]||p.traffic==='idle'))?p.traffic:(CAT.video?'video':t.options[1].value);fq(p.quality);if(p.streams)tr.querySelector('.mn').value=p.streams;if(p.method&&!tr.querySelector('.mm').disabled)tr.querySelector('.mm').value=p.method;if(p.rate)r.value=p.rate;mcount();return tr}
+document.getElementById('mt').appendChild(tr);if(p.mac)tr.querySelector('.mc').value=p.mac;if(p.ip)tr.querySelector('.mip').value=p.ip;t.value=(p.traffic&&(CAT[p.traffic]||p.traffic==='idle'))?p.traffic:(CAT.video?'video':t.options[1].value);fq(p.quality);if(p.streams)tr.querySelector('.mn').value=p.streams;if(p.method&&!tr.querySelector('.mm').disabled)tr.querySelector('.mm').value=p.method;if(p.rate)r.value=p.rate;mcount();return tr}
 function mfill(){document.querySelectorAll('#mt .mc').forEach(s=>{const v=s.value;s.innerHTML=mclients();s.value=v})}
 function mrows(){return [...document.querySelectorAll('#mt tr')].slice(1).map(tr=>({mac:tr.querySelector('.mc').value,ip:tr.querySelector('.mip').value.trim(),traffic:tr.querySelector('.mt').value,quality:tr.querySelector('.mq').value,streams:+tr.querySelector('.mn').value,rate:+tr.querySelector('.mr').value,method:tr.querySelector('.mm').value}))}
 function msetRows(rows){document.querySelectorAll('#mt tr').forEach((tr,i)=>{if(i)tr.remove()});rows.forEach(maddRow);mcount()}
@@ -1276,6 +1277,7 @@ else if(r&&r.tool==='observe'){got=r.avg_down_mbps+' \u2193 / '+r.avg_up_mbps+' 
 else if(r){got=r.mbps+' Mbps';ver=v?badge(v.grade):'<span class=mut>load</span>';det=v?v.reasons.map(esc).join('<br>'):'<span class=mut>iperf3 run: no requirement to judge, it is load for the others.</span>'}
 h+=`<tr><td>${who}</td><td>${esc(t.label)}</td><td>${t.required==null?'<span class=mut>max</span>':t.required+' Mbps '+(t.required_dir==='down'?'\u2193':'\u2191')}</td><td>${got}</td><td>${ver}</td><td>${det}</td></tr>`});
 h+='</table>';const m=s.summary;
+if(m)h+='<div style="margin-top:10px"><a href="api/test/report.pdf" download style="padding:6px 14px;border-radius:6px;background:var(--a);color:#fff;text-decoration:none">Download PDF report</a></div>';
 if(m){h+=`<div style="margin-top:10px">${badge(m.grade)} <b>${m.good}</b> good, <b>${m.marginal}</b> marginal, <b>${m.bad}</b> bad`+(m.no_traffic?`, <b>${m.no_traffic}</b> with no traffic (app not started?)`:'')+((m.no_result-m.no_traffic)>0?`, <b>${m.no_result-m.no_traffic}</b> no result`:'')+(m.load_only?`, ${m.load_only} iperf load`:'')+` &middot; total ${m.measured_total} Mbps delivered, ${m.required_total} Mbps needed`+(m.overlap_s!=null?` &middot; ran together for ${m.overlap_s}s`:'')+(m.util_max?` &middot; radio up to ${m.util_max}% busy`:'')+'</div>'
 +(m.overlap_s!=null&&m.overlap_s<3?'<div class=hot>The tests barely overlapped - start the helpers on every client first, then press Run all.</div>':'')}
 $('mres').innerHTML=h}
@@ -1301,6 +1303,14 @@ def serve(mon, bind, port):
             elif u.path == "/api/ports": body, ct = json.dumps(list_serial_ports()).encode(), "application/json"
             elif u.path == "/api/config": body, ct = json.dumps(mon.config()).encode(), "application/json"
             elif u.path == "/api/test/pending": body, ct = json.dumps(mon.pending_for(self.client_address[0], qs.get("ip"))).encode(), "application/json"
+            elif u.path == "/api/test/report.pdf":
+                st = mon.test_status()
+                if not st.get("multi") and st.get("state") != "done": body, ct = json.dumps({"error": "No finished test to report yet."}).encode(), "application/json"
+                else:
+                    st = st if st.get("multi") else {"tests": [st], "summary": None}
+                    body, ct = report.build_report(st, mon.state), "application/pdf"
+                    self.send_response(200); self.send_header("Content-Type", ct); self.send_header("Content-Length", str(len(body)))
+                    self.send_header("Content-Disposition", 'attachment; filename="wifi-assessment-%s.pdf"' % time.strftime("%Y%m%d-%H%M")); self.end_headers(); self.wfile.write(body); return
             elif u.path == "/api/test/status": body, ct = json.dumps(mon.test_status()).encode(), "application/json"
             elif u.path.startswith("/api/state"): body, ct = mon.snapshot().encode(), "application/json"
             elif self.path in ("/", "/index.html"): body, ct = HTML.encode(), "text/html; charset=utf-8"

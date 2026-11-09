@@ -99,6 +99,8 @@ iperf3 rows have no requirement to judge: they are extra load, and the other cli
 
 Set a row's **Doing** to **Idle – not in this test** to keep a connected client in the list but leave it out of the run (it is skipped and shown greyed out).
 
+When a run finishes, **Download PDF report** (under the results) saves a one-click report: overall grade, per-client need vs measured, link stats and the reasons.
+
 ### Watch real traffic (default) vs generate with iperf3
 Each row has a **How** choice. **Watch real traffic** (default for audio / video / call / game / IoT rows) sends nothing and installs nothing on the client:
 start the real app on the device (Netflix on the TV, Spotify on the phone, a Teams call on the laptop), press **Run all**, and for the chosen time the dashboard
