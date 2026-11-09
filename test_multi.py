@@ -15,6 +15,25 @@ class Plumbing(unittest.TestCase):
         self.assertEqual(ic.build_argv(j), ["iperf3", "-c", "10.0.0.2", "-p", "5202", "-t", "15", "-b", "6M", "-R"])
         self.assertIn("-b", s.iperf3_argv("10.0.0.2", "tcp_up", 8, 1, 6, 5201, None, 6)); self.assertNotIn("-b", s.iperf3_argv("10.0.0.2", "tcp_up", 8, 1, 6))
 
+class StaleClients(unittest.TestCase):
+    def mon(self, states):
+        be = w.SimBackend(w.Runner(None)); mac = be.cl[0][0]
+        be.ip_to_mac = lambda: {"10.0.0.50": "aa:bb:cc:00:00:01", "10.0.0.51": "aa:bb:cc:00:00:02", "10.0.0.52": "aa:bb:cc:00:00:03"}
+        be.neigh_state = states
+        m = w.Monitor(be, 1, None); return m
+    def macs(self, m): return {l["mac"] for l in m.state["lan"]}
+    def test_parse_states(self):
+        txt = "192.168.1.5 dev br0 lladdr aa:bb:cc:dd:ee:01 REACHABLE\n192.168.1.6 dev br0 lladdr aa:bb:cc:dd:ee:02 STALE\n192.168.1.7 dev br0  FAILED\nfe80::1 dev br0 lladdr aa:bb:cc:dd:ee:03 router STALE\n"
+        self.assertEqual(w.parse_neigh_states(txt), {"192.168.1.5": "REACHABLE", "192.168.1.6": "STALE", "192.168.1.7": "FAILED", "fe80::1": "STALE"})
+    def test_leftover_entries_never_shown_and_active_ones_age_out(self):
+        m = self.mon({"10.0.0.50": "REACHABLE", "10.0.0.51": "STALE", "10.0.0.52": "FAILED"}); m.poll()
+        self.assertEqual(self.macs(m), {"aa:bb:cc:00:00:01"})                          # the stale / failed leftovers (e.g. from the previous AP) are not offered
+        m.be.neigh_state = {"10.0.0.50": "STALE", "10.0.0.51": "STALE", "10.0.0.52": "FAILED"}; m.poll()
+        self.assertIn("aa:bb:cc:00:00:01", self.macs(m))                              # just went idle: kept for a while
+        m.lan_seen["aa:bb:cc:00:00:01"] -= 700; m.poll(); self.assertEqual(self.macs(m), set())    # not seen alive for > 10 min: gone
+    def test_no_state_information_is_trusted(self):
+        m = self.mon(None); m.poll(); self.assertEqual(len(self.macs(m)), 3)
+
 class Verdict(unittest.TestCase):
     def test_target_demand_grades(self):
         self.assertEqual(w._verdict(res(25), T(25))["grade"], "GOOD")
@@ -72,10 +91,26 @@ class Concurrent(unittest.TestCase):
         self.assertAlmostEqual(a["result"]["mbps"], 6.0, delta=1.0)                  # rate-limited to what the profile needs, not flat out
         self.assertFalse(c["result"]["ok"]); self.assertIn("127.0.0.4", c["result"]["error"])
         m = st["summary"]; self.assertEqual((m["good"], m["no_result"], m["grade"]), (2, 1, "BAD")); self.assertIsNotNone(m["overlap_s"]); self.assertGreater(m["overlap_s"], 2)
+    def test_iperf_row_mixed_with_profiles_is_load_not_graded(self):
+        items = [{"ip": "127.0.0.2", "traffic": "spotify", "quality": "Very High (320 kbps)"},
+                 {"ip": "127.0.0.3", "traffic": "iperf3", "quality": s.MODES["tcp_down"], "streams": 2},
+                 {"ip": "127.0.0.4", "traffic": "iperf3", "quality": s.MODES["udp_up"], "rate": 20}]
+        self.assertEqual(self.mon.start_multi({"items": items, "secs": 5}), {"ok": True, "count": 3})
+        a, b, c = self.mon.tests
+        self.assertIsNone(b["required"]); self.assertIn("-P 2", b["cmd"]); self.assertNotIn(" -b ", b["cmd"]); self.assertIn("-u -b 20M", c["cmd"]); self.assertIn("-b 0.32M", a["cmd"])
+        out = {}; th = [threading.Thread(target=self.helper, args=(ip, out)) for ip in ("127.0.0.2", "127.0.0.3", "127.0.0.4")]
+        for x in th: x.start()
+        for x in th: x.join(70)
+        for _ in range(100):
+            if all(t["state"] != "waiting" for t in self.mon.tests): break
+            time.sleep(0.3)
+        st = self.mon.test_status(); r = [x["result"] for x in st["tests"]]
+        self.assertTrue(all(x["ok"] for x in r), r); self.assertEqual(r[0]["verdict"]["grade"], "GOOD"); self.assertIsNone(r[1]["verdict"]); self.assertIsNone(r[2]["verdict"])
+        m = st["summary"]; self.assertEqual((m["good"], m["load_only"], m["no_result"], m["grade"], m["clients"]), (1, 2, 0, "GOOD", 3)); self.assertGreater(r[1]["mbps"], 100)
     def test_validation(self):
         two = [{"ip": "127.0.0.2", "traffic": "video"}, {"ip": "127.0.0.2", "traffic": "video"}]
         self.assertIn("already in the list", self.mon.start_multi({"items": two})["error"])
-        self.assertIn("what this client will be doing", self.mon.start_multi({"items": [{"ip": "127.0.0.2", "traffic": "iperf3"}]})["error"])
+        self.assertIn("what this client will be doing", self.mon.start_multi({"items": [{"ip": "127.0.0.2", "traffic": "speedtest"}]})["error"])
         self.assertIn("valid IP", self.mon.start_multi({"items": [{"ip": "999.1.1.1", "traffic": "video"}]})["error"])
         self.assertIn("--slots", self.mon.start_multi({"items": [{"ip": f"127.0.0.{i + 2}", "traffic": "video"} for i in range(4)]})["error"])
         self.mon.iperf_server = None; self.assertIn("iperf agent", self.mon.start_multi({"items": [{"ip": "127.0.0.2", "traffic": "video"}]})["error"])

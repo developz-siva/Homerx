@@ -101,6 +101,16 @@ def parse_neigh(text):
         if m: out[m.group(1)] = m.group(2).lower()
     return out
 
+ALIVE_STATES = ("REACHABLE", "DELAY", "PROBE", "PERMANENT")
+
+def parse_neigh_states(text):
+    """`ip neigh` -> {ip: state}. STALE / FAILED / INCOMPLETE entries are leftovers: the device may be long gone (e.g. it was on the previous AP)."""
+    out = {}
+    for line in text.splitlines():
+        p = line.split()
+        if p and re.match(r"[0-9a-f.:]+$", p[0], re.I) and p[-1].isupper(): out[p[0]] = p[-1]
+    return out
+
 def parse_leases(text):  # dnsmasq: expiry mac ip hostname clientid
     out = {}
     for line in text.splitlines():
@@ -221,7 +231,8 @@ class Backend:
         n = int(self.max_flows)
         txt = self.r.run(f"head -n {n} /proc/net/nf_conntrack 2>/dev/null || conntrack -L -o extended 2>/dev/null | head -n {n}", timeout=30)
         return parse_conntrack(txt)
-    def ip_to_mac(self): return parse_neigh(self.r.run("ip neigh"))
+    def ip_to_mac(self):
+        text = self.r.run("ip neigh"); self.neigh_state = parse_neigh_states(text); return parse_neigh(text)
     def hostnames(self):
         return parse_leases(self.r.run("cat /tmp/dhcp.leases /var/lib/misc/dnsmasq.leases 2>/dev/null"))
 
@@ -444,6 +455,7 @@ class Monitor:
         self.mem = None                                         # memwatch.MemCollector when --mem-host is given      # server-PC mode: base URL of iperf_agent.py
         self.state = {"ts": 0, "radios": [], "clients": [], "summary": {}}
         self.lock = threading.Lock()
+        self.lan_seen, self.lan_ttl = {}, 600.0                       # mac -> last time a wired/other device looked alive (stale neighbour entries are hidden)
         self.conn_lock, self.runner, self.mem_dir, self.settings_path = threading.Lock(), None, "memlogs", None
         self.conn = {"state": "connected" if backend else "setup", "error": "", "info": {}, "label": ""}
 
@@ -523,8 +535,11 @@ class Monitor:
         seen = {i for c in clients for i in c["ips"]} | {c["mac"] for c in clients} | {c["host"].lower() for c in clients if c["host"]}
         missing = [k for k in self.types if k not in seen]
         lan = {}
+        nst = getattr(be, "neigh_state", None) or {}
         for ip, m in ip2mac.items():
             if m in stas: continue
+            if nst.get(ip) is None or nst[ip] in ALIVE_STATES or m in per: self.lan_seen[m] = now      # no state info = trust it
+            if now - self.lan_seen.get(m, 0) > self.lan_ttl: continue                                # stale leftover (previous AP, powered off, ...)
             e = lan.setdefault(m, {"mac": m, "ips": [], "host": hosts.get(m, ""), "wifi": False}); e["ips"].append(ip)
             e["type"] = resolve_type(self.types, m, e["host"], e["ips"]) if self.types else None
         by_class = {}
@@ -625,7 +640,7 @@ class Monitor:
         if self.be is None: return {"error": "Not connected to a device - open Connection and connect first."}
         if not self.iperf_server: return {"error": "Testing several clients at once needs the iperf agent: run iperf_agent.py on the server PC and start the dashboard with --iperf-server."}
         items = req.get("items") or []
-        if not isinstance(items, list) or not 1 <= len(items) <= 32: return {"error": "Add between 1 and 32 clients."}
+        if not isinstance(items, list) or not 1 <= len(items) <= 64: return {"error": "Add between 1 and 64 clients."}
         with self.lock:
             if self.active(): return {"error": "A test is already running."}
             st = self.state
@@ -643,7 +658,7 @@ class Monitor:
         for i, it in enumerate(items):
             row = f"Client {i + 1}: "
             key = it.get("traffic"); spec = planner.CATALOG.get(key)
-            if not spec or spec.get("test"): return {"error": row + "choose what this client will be doing (video, call, game, ...)."}
+            if not spec or spec.get("test") not in (None, "iperf3"): return {"error": row + "choose what this client will be doing (video, call, game, max throughput, ...)."}
             quality = it.get("quality") if it.get("quality") in spec["qualities"] else spec["default"]
             try: n = max(1, min(int(it.get("streams", 1)), 20))
             except (TypeError, ValueError): return {"error": row + "streams must be a number."}
@@ -657,20 +672,27 @@ class Monitor:
             ip = client["ips"][0]
             if ip in seen: return {"error": row + f"{ip} is already in the list."}
             seen.add(ip)
-            need = planner.plan(None, key, quality, n)["required"]
-            dl = need["down_mbps"] >= need["up_mbps"]
-            req_mbps = max(0.05, need["down_mbps"] if dl else need["up_mbps"])
-            udp = bool(spec.get("rt")) and not dl                  # real-time uploads: UDP, so the server can measure loss + jitter
-            mode = ("udp_" if udp else "tcp_") + ("down" if dl else "up")
-            rate = round(req_mbps * (1.5 if demand == "max" else 1.0), 3) if udp else req_mbps
-            tcp_rate = req_mbps if (demand == "target" and not udp) else None
-            t = {"state": "waiting", "tool": "iperf3", "mode": mode, "mac": client["mac"], "ip": ip, "ips": list(client["ips"]), "host": client.get("host") or "", "secs": secs, "streams": 1,
+            if spec.get("test") == "iperf3":                        # a plain iperf3 throughput run: no requirement to judge against, it is also the load on the others
+                mode = spec["qualities"][quality].get("mode") or "tcp_down"; dl = mode.endswith("down"); udp = mode.startswith("udp")
+                try: rate = max(0.1, min(float(it.get("rate") or 50), 10000.0))
+                except (TypeError, ValueError): return {"error": row + "the UDP rate must be a number."}
+                req_mbps, tcp_rate, need_label = None, None, None
+            else:
+                need = planner.plan(None, key, quality, n)["required"]
+                dl = need["down_mbps"] >= need["up_mbps"]
+                req_mbps = max(0.05, need["down_mbps"] if dl else need["up_mbps"])
+                udp = bool(spec.get("rt")) and not dl              # real-time uploads: UDP, so the server can measure loss + jitter
+                mode = ("udp_" if udp else "tcp_") + ("down" if dl else "up")
+                rate = round(req_mbps * (1.5 if demand == "max" else 1.0), 3) if udp else req_mbps
+                tcp_rate = req_mbps if (demand == "target" and not udp) else None
+            streams = n if spec.get("test") == "iperf3" else 1
+            t = {"state": "waiting", "tool": "iperf3", "mode": mode, "mac": client["mac"], "ip": ip, "ips": list(client["ips"]), "host": client.get("host") or "", "secs": secs, "streams": streams,
                  "rate": rate, "started": time.time(), "samples": [], "result": None, "server": True, "server_ip": sip, "port": ports[i], "after": ag.get("last_id", 0), "others": [],
-                 "cancel": False, "claimed": False, "deadline": time.time() + self.arm_timeout, "required": round(req_mbps, 2), "required_dir": "down" if dl else "up", "demand": demand,
+                 "cancel": False, "claimed": False, "deadline": time.time() + self.arm_timeout, "required": round(req_mbps, 2) if req_mbps else None, "required_dir": "down" if dl else "up", "demand": demand,
                  "tcp_rate": tcp_rate, "traffic": key, "label": f"{spec['label']} - {quality}" + (f" x{n}" if n > 1 else ""), "loss_limit": spec.get("loss_pct"), "jitter_limit": spec.get("jitter_ms"),
                  "util_before": next((r.get("util_pct") for r in st["radios"] if r["iface"] == client.get("iface")), None)}
             t["bind"] = ip if self.bind_client else None
-            t["cmd"] = speedtools.client_cmd(sip, t["port"], mode, secs, 1, rate, t["bind"], tcp_rate)
+            t["cmd"] = speedtools.client_cmd(sip, t["port"], mode, secs, streams, rate, t["bind"], tcp_rate)
             tests.append(t)
         self.test, self.tests = tests[0], tests
         for t in tests: threading.Thread(target=self._wait_test, args=(t,), daemon=True).start()
@@ -696,7 +718,7 @@ class Monitor:
                     " Check the client can reach the server PC on that port (firewall, same subnet, Wi-Fi client isolation).")}
                 break
             try:
-                r = self._agent(f"/results?after={t['after']}"); fails = 0
+                r = self._agent(f"/results?after={t['after']}" + (f"&port={t['port']}" if t.get("port") else "")); fails = 0
                 for x in r.get("results", []):
                     t["after"] = max(t["after"], x["id"])
                     p = speedtools.parse_iperf3_server(x["raw"])
@@ -753,7 +775,7 @@ class Monitor:
         out = {k: t[k] for k in ("state", "tool", "mode", "mac", "ip", "secs", "streams", "rate", "result")} | {
             "elapsed": round((t.get("finished") or time.time()) - t["started"]), "samples": len(t["samples"])}
         if t.get("server"): out |= {"server": True, "cmd": t["cmd"], "server_ip": t["server_ip"], "others": t["others"], "remaining": max(0, round(t["deadline"] - time.time())), "claimed": t["claimed"], "port": t.get("port")}
-        if t.get("required") is not None: out |= {"required": t["required"], "required_dir": t["required_dir"], "label": t["label"], "host": t.get("host", ""), "demand": t["demand"]}
+        if t.get("label"): out |= {"required": t["required"], "required_dir": t["required_dir"], "label": t["label"], "host": t.get("host", ""), "demand": t["demand"]}
         return out
 
     def test_status(self):
@@ -868,7 +890,7 @@ class Monitor:
         with self.conn_lock:
             old = self.runner
             self.be, self.runner = be, runner
-            self.rssi_hist, self.mix_hist, self.prev_surv, self.prev_flow, self.prev_sta, self.last_t = {}, {}, {}, None, {}, None
+            self.rssi_hist, self.mix_hist, self.prev_surv, self.prev_flow, self.prev_sta, self.last_t, self.lan_seen = {}, {}, {}, None, {}, None, {}
             self.state = {"ts": 0, "radios": [], "clients": [], "summary": {}}
             t = cfg.get("transport") or "ssh"
             where = {"serial": cfg.get("serial_port"), "ubus": cfg.get("http_url"), "local": "this computer", "sim": "demo data"}.get(t) or (cfg.get("host") or "on this machine")
@@ -930,13 +952,14 @@ def _verdict(res, t):
     return {"grade": grade, "required": req, "measured": mbps, "ratio": round(ratio, 2), "reasons": why}
 
 def _multi_summary(tests):
-    done = [t for t in tests if t["state"] == "done" and (t.get("result") or {}).get("verdict")]
-    g = [t["result"]["verdict"]["grade"] for t in done]
-    wins = [t["win"] for t in done if t.get("win")]
+    ok = [t for t in tests if t["state"] == "done"]
+    graded = [t for t in ok if (t.get("result") or {}).get("verdict")]
+    g = [t["result"]["verdict"]["grade"] for t in graded]
+    wins = [t["win"] for t in ok if t.get("win")]
     overlap = round(min(w[1] for w in wins) - max(w[0] for w in wins), 1) if len(wins) > 1 else None
-    out = {"good": g.count("GOOD"), "marginal": g.count("MARGINAL"), "bad": g.count("BAD"), "no_result": len(tests) - len(done),
-           "measured_total": round(sum(t["result"]["verdict"]["measured"] for t in done), 1), "required_total": round(sum(t["required"] for t in tests), 1),
-           "overlap_s": overlap, "util_max": max([(t["result"].get("link") or {}).get("util_max") or 0 for t in done] or [0]) or None}
+    out = {"good": g.count("GOOD"), "marginal": g.count("MARGINAL"), "bad": g.count("BAD"), "no_result": len(tests) - len(ok), "load_only": len(ok) - len(graded),
+           "measured_total": round(sum((t["result"].get("mbps") or 0) for t in ok), 1), "required_total": round(sum(t["required"] or 0 for t in tests), 1),
+           "overlap_s": overlap, "util_max": max([(t["result"].get("link") or {}).get("util_max") or 0 for t in ok] or [0]) or None, "clients": len(tests)}
     out["grade"] = "BAD" if (out["bad"] or out["no_result"]) else "MARGINAL" if out["marginal"] else "GOOD"
     return out
 
@@ -1055,12 +1078,16 @@ th{color:var(--mut);font-weight:500}.mut{color:var(--mut)}.tag{display:inline-bl
 <label>&nbsp;<button id=tb style="font:inherit;padding:7px 16px;border-radius:6px;border:0;background:var(--a);color:#fff;cursor:pointer">Run test</button></label></div>
 <div id=tn class=mut style="margin-bottom:8px"></div><div id=tres></div></div></div>
 <div class=card id=mc><h2>Test several clients at the same time</h2>
-<div class=mut style="margin-bottom:8px">Choose what each client is doing. All tests start together, and every client is judged against the Mbps <b>its own</b> activity needs: GOOD, MARGINAL or BAD.
-Run <code>iperf_client.py</code> on each client PC (or paste the command shown for it). Needs the iperf agent (<code>--iperf-server</code>).</div>
-<table id=mt><tr><th>Client</th><th>Doing</th><th>Quality</th><th>&times;</th><th></th></tr></table>
+<div class=mut style="margin-bottom:8px">Give every client its own activity (audio, video, 4K, Teams call, game, or a plain iperf3 run) and run them all together. Each client is judged GOOD / MARGINAL / BAD against the Mbps
+<b>its own</b> activity needs; iperf3 rows are extra load. Run <code>iperf_client.py</code> on each client PC (or paste the command shown for it). Needs the iperf agent (<code>--iperf-server</code>).</div>
+<div class=ctl><label>Quick fill (applies to the rows below)<select id=mpat></select></label>
+<label>&nbsp;<span><button id=mpapply>Apply to all rows</button> <button id=mall>Add all connected clients</button> <button id=madd>+ Add row</button> <button id=mclear>Clear</button></span></label>
+<label>Saved scenarios<select id=msl></select></label><label>Name<input id=msn placeholder="Evening mix" style="min-width:120px"></label>
+<label>&nbsp;<span><button id=msave>Save</button> <button id=mload>Load</button> <button id=mdel>Delete</button></span></label></div>
+<div style="max-height:460px;overflow:auto"><table id=mt><tr><th>Client</th><th>Doing</th><th>Quality / test</th><th>&times;</th><th>UDP Mbps</th><th></th></tr></table></div>
 <div class=ctl style="margin-top:10px"><label>Duration (s)<input id=md type=number value=15 min=5 max=120 style="min-width:80px"></label>
 <label>Demand<select id=mdem><option value=target>Exactly what each needs</option><option value=max>Flat out (shows headroom)</option></select></label>
-<label>&nbsp;<span><button id=madd>+ Add client</button> <button id=mrun style="font:inherit;padding:7px 16px;border-radius:6px;border:0;background:var(--a);color:#fff;cursor:pointer">Run all</button></span></label></div>
+<label>&nbsp;<span><button id=mrun style="font:inherit;padding:7px 16px;border-radius:6px;border:0;background:var(--a);color:#fff;cursor:pointer">Run all</button> <span id=mcount class=mut></span></span></label></div>
 <div id=mres></div></div>
 <div class=grid id=radios></div><div class=card style="margin-top:14px"><h2>Traffic by class (Mbps)</h2><div id=cls></div></div>
 <div class=card><h2>Insights &amp; recommendations</h2><div id=ins></div></div>
@@ -1128,20 +1155,38 @@ h+='</div><div class=mut style="line-height:1.6"><b>QoS:</b> WMM '+esc(r.qos.wmm
 let SRV=false;
 async function boot(){try{CAT=await (await fetch('api/catalog')).json();SRV=(await (await fetch('api/config')).json()).iperf_server}catch(e){return}
 $('pt').innerHTML='<option value="">— select traffic —</option>'+Object.entries(CAT).map(([k,v])=>`<option value="${k}">${esc(v.label)}</option>`).join('');
-$('pt').onchange=()=>{fillQual();testUI();plan()};$('pq').addEventListener('change',testUI);['pc','pq','pn'].forEach(i=>$(i).onchange=plan);$('pc').addEventListener('change',()=>{if($('pc').value)$('pip').value=''});$('tb').onclick=runTest;$('madd').onclick=maddRow;$('mrun').onclick=mrun;maddRow();maddRow();setInterval(tstat,1000)}
+$('pt').onchange=()=>{fillQual();testUI();plan()};$('pq').addEventListener('change',testUI);['pc','pq','pn'].forEach(i=>$(i).onchange=plan);$('pc').addEventListener('change',()=>{if($('pc').value)$('pip').value=''});$('tb').onclick=runTest;$('madd').onclick=()=>maddRow();$('mrun').onclick=mrun;$('mpapply').onclick=mapply;$('mall').onclick=mall;$('mclear').onclick=()=>msetRows([]);mpatInit();scenList();
+$('msave').onclick=()=>{const n=$('msn').value.trim();if(!n)return;const o=scen();o[n]=mrows();scenSave(o);scenList();$('msl').value=n};
+$('mload').onclick=()=>{const r=scen()[$('msl').value];if(r){msetRows(r);$('msn').value=$('msl').value}};$('mdel').onclick=()=>{const o=scen();delete o[$('msl').value];scenSave(o);scenList()};maddRow();maddRow();setInterval(tstat,1000)}
 function testUI(){const k=$('pt').value,c=CAT&&CAT[k];$('tp').style.display=c&&c.test?'block':'none';if(!c||!c.test)return;const m=c.modes[$('pq').value]||'',ip=c.test==='iperf3';
 $('tdl').style.display=ip?'':'none';$('tsl').style.display=ip?'':'none';$('trl').style.display=(ip&&m.startsWith('udp'))?'':'none';
 $('tn').textContent=ip&&SRV?"Server-PC mode: press Run test, then run the shown iperf3 command on the selected Wi-Fi client. Download = add -R. The result is tied to the client by its IP; link metrics are captured during the run.":ip?"Needs an iperf3 server on the selected client (run: iperf3 -s; phones have iperf3 apps) with port 5201 allowed. Download = host to client, upload = client to host. Link metrics are sampled about every 2 s while the test runs.":"Runs on the machine running this dashboard: it measures that machine's internet speed, not the selected client's."}
 
-function mtraffic(){return Object.entries(CAT||{}).filter(([k,v])=>!v.test).map(([k,v])=>`<option value="${k}">${esc(v.label)}</option>`).join('')}
+function mtraffic(){return Object.entries(CAT||{}).filter(([k,v])=>v.test!=='speedtest').map(([k,v])=>`<option value="${k}">${esc(v.label)}</option>`).join('')}
 function mclients(){return '<option value="">— client —</option>'+(window.CL||[]).map(a=>`<option value="${esc(a.mac)}">${esc(a.t)}</option>`).join('')}
-function maddRow(){if(!CAT)return;const tr=document.createElement('tr');
-tr.innerHTML=`<td><select class=mc>${mclients()}</select> <input class=mip placeholder="or IP" style="min-width:110px;width:120px"></td><td><select class=mt>${mtraffic()}</select></td><td><select class=mq></select></td><td><input class=mn type=number value=1 min=1 max=20 style="min-width:60px;width:60px"></td><td><button class=mx>&#10005;</button></td>`;
-const q=tr.querySelector('.mq'),t=tr.querySelector('.mt'),fq=()=>{const c=CAT[t.value];q.innerHTML=(c?c.qualities:[]).map(x=>`<option value="${esc(x)}"${x===c.default?' selected':''}>${esc(x)}</option>`).join('')};
-t.onchange=fq;fq();tr.querySelector('.mx').onclick=()=>tr.remove();document.getElementById('mt').appendChild(tr)}
+function pickQ(k,re){const c=CAT[k];if(!c)return '';const q=c.qualities.find(x=>re&&new RegExp(re,'i').test(x));return q||c.default}
+function mcount(){const n=document.querySelectorAll('#mt tr').length-1;$('mcount').textContent=n+' client'+(n==1?'':'s')+' in this run'}
+function maddRow(p){if(!CAT)return;p=p||{};const tr=document.createElement('tr');
+tr.innerHTML=`<td><select class=mc>${mclients()}</select> <input class=mip placeholder="or IP" style="min-width:100px;width:110px"></td><td><select class=mt>${mtraffic()}</select></td><td><select class=mq></select></td><td><input class=mn type=number value=1 min=1 max=20 style="min-width:56px;width:56px"></td><td><input class=mr type=number value=50 min=0.1 step=any style="min-width:70px;width:70px"></td><td><button class=mx>&#10005;</button></td>`;
+const q=tr.querySelector('.mq'),t=tr.querySelector('.mt'),r=tr.querySelector('.mr'),fq=(sel)=>{const c=CAT[t.value];q.innerHTML=(c?c.qualities:[]).map(x=>`<option value="${esc(x)}">${esc(x)}</option>`).join('');q.value=sel&&c.qualities.includes(sel)?sel:(c?c.default:'');ur()},
+ur=()=>{const c=CAT[t.value];r.style.visibility=(c&&c.test==='iperf3'&&/udp/i.test((c.modes||{})[q.value]||''))?'visible':'hidden'};
+t.onchange=()=>fq();q.onchange=ur;tr.querySelector('.mx').onclick=()=>{tr.remove();mcount()};
+document.getElementById('mt').appendChild(tr);if(p.mac)tr.querySelector('.mc').value=p.mac;if(p.ip)tr.querySelector('.mip').value=p.ip;if(p.traffic&&CAT[p.traffic])t.value=p.traffic;fq(p.quality);if(p.streams)tr.querySelector('.mn').value=p.streams;if(p.rate)r.value=p.rate;mcount();return tr}
 function mfill(){document.querySelectorAll('#mt .mc').forEach(s=>{const v=s.value;s.innerHTML=mclients();s.value=v})}
+function mrows(){return [...document.querySelectorAll('#mt tr')].slice(1).map(tr=>({mac:tr.querySelector('.mc').value,ip:tr.querySelector('.mip').value.trim(),traffic:tr.querySelector('.mt').value,quality:tr.querySelector('.mq').value,streams:+tr.querySelector('.mn').value,rate:+tr.querySelector('.mr').value}))}
+function msetRows(rows){document.querySelectorAll('#mt tr').forEach((tr,i)=>{if(i)tr.remove()});rows.forEach(maddRow);mcount()}
+const PAT={'Home mix: audio, video, 4K video, Teams call':[['spotify','Very High'],['video','720p'],['video','^4K UHD'],['teams','recommended']],
+'Mix 2: audio, iperf, video, game':[['spotify','Very High'],['iperf3','TCP download'],['video','1080p'],['game','typical']],
+'Everyone streams 4K HDR video':[['video','Dolby']],'Everyone on a Teams video call':[['teams','recommended']],'Everyone runs iperf3 (TCP download)':[['iperf3','TCP download']]};
+function mpatInit(){$('mpat').innerHTML=Object.keys(PAT).map(k=>`<option>${esc(k)}</option>`).join('')}
+function mapply(){const p=PAT[$('mpat').value];if(!p)return;document.querySelectorAll('#mt tr').forEach((tr,i)=>{if(!i)return;const [k,re]=p[(i-1)%p.length],t=tr.querySelector('.mt');t.value=k;t.onchange();const q=tr.querySelector('.mq');q.value=pickQ(k,re);q.onchange()})}
+function mall(){const have=new Set(mrows().map(r=>r.mac));const rows=document.querySelectorAll('#mt tr');(window.CL||[]).filter(a=>!have.has(a.mac)).forEach(a=>maddRow({mac:a.mac,traffic:'video',quality:pickQ('video','720p')}));
+if(document.querySelectorAll('#mt tr').length>1)mapply()}
+function scen(){try{return JSON.parse(localStorage.getItem('wm_scen')||'{}')}catch(e){return {}}}
+function scenSave(o){try{localStorage.setItem('wm_scen',JSON.stringify(o))}catch(e){}}
+function scenList(){$('msl').innerHTML=Object.keys(scen()).map(k=>`<option>${esc(k)}</option>`).join('')||'<option value="">(none saved)</option>'}
 async function mrun(){const b=$('mrun');if(b.dataset.cancel){await fetch('api/test/cancel',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});return}
-const items=[...document.querySelectorAll('#mt tr')].slice(1).map(tr=>{const ip=tr.querySelector('.mip').value.trim();return {mac:ip?'':tr.querySelector('.mc').value,ip,traffic:tr.querySelector('.mt').value,quality:tr.querySelector('.mq').value,streams:+tr.querySelector('.mn').value}});
+const items=mrows().map(r=>({...r,mac:r.ip?'':r.mac}));
 if(!items.length){$('mres').innerHTML='<div class=hot>Add at least one client.</div>';return}
 let r;try{r=await (await fetch('api/test/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({items,secs:+$('md').value,demand:$('mdem').value})})).json()}catch(e){$('mres').textContent='Could not start the tests.';return}
 if(r.error){$('mres').innerHTML='<div class=hot>\u2716 '+esc(r.error)+'</div>';return}$('mres').textContent='Starting\u2026';tstat()}
@@ -1153,10 +1198,10 @@ s.tests.forEach(t=>{const r=t.result,v=r&&r.verdict,who=esc(t.host||t.ip)+(t.hos
 if(t.state==='waiting'){ver='<span class=mut>'+(t.claimed?'running\u2026':'armed')+'</span>';det='<span class=mut>'+(t.claimed?'The client helper started it.':'Waiting for the client ('+t.remaining+'s). Run on it: ')+'</span>'+(t.claimed?'':'<code style="user-select:all">'+esc(t.cmd)+'</code>')}
 else if(t.state==='cancelled'){ver='<span class=mut>cancelled</span>'}
 else if(r&&!r.ok){ver=badge('BAD');det='<span class=hot>'+esc(r.error||'failed')+'</span>'}
-else if(r){got=r.mbps+' Mbps';ver=v?badge(v.grade):'';det=v?v.reasons.map(esc).join('<br>'):''}
-h+=`<tr><td>${who}</td><td>${esc(t.label)}</td><td>${t.required} Mbps ${t.required_dir==='down'?'\u2193':'\u2191'}</td><td>${got}</td><td>${ver}</td><td>${det}</td></tr>`});
+else if(r){got=r.mbps+' Mbps';ver=v?badge(v.grade):'<span class=mut>load</span>';det=v?v.reasons.map(esc).join('<br>'):'<span class=mut>iperf3 run: no requirement to judge, it is load for the others.</span>'}
+h+=`<tr><td>${who}</td><td>${esc(t.label)}</td><td>${t.required==null?'<span class=mut>max</span>':t.required+' Mbps '+(t.required_dir==='down'?'\u2193':'\u2191')}</td><td>${got}</td><td>${ver}</td><td>${det}</td></tr>`});
 h+='</table>';const m=s.summary;
-if(m){h+=`<div style="margin-top:10px">${badge(m.grade)} <b>${m.good}</b> good, <b>${m.marginal}</b> marginal, <b>${m.bad+m.no_result}</b> bad/no result &middot; total ${m.measured_total} of ${m.required_total} Mbps needed`+(m.overlap_s!=null?` &middot; ran together for ${m.overlap_s}s`:'')+(m.util_max?` &middot; radio up to ${m.util_max}% busy`:'')+'</div>'
+if(m){h+=`<div style="margin-top:10px">${badge(m.grade)} <b>${m.good}</b> good, <b>${m.marginal}</b> marginal, <b>${m.bad}</b> bad`+(m.no_result?`, <b>${m.no_result}</b> no result`:'')+(m.load_only?`, ${m.load_only} iperf load`:'')+` &middot; total ${m.measured_total} Mbps delivered, ${m.required_total} Mbps needed`+(m.overlap_s!=null?` &middot; ran together for ${m.overlap_s}s`:'')+(m.util_max?` &middot; radio up to ${m.util_max}% busy`:'')+'</div>'
 +(m.overlap_s!=null&&m.overlap_s<3?'<div class=hot>The tests barely overlapped - start the helpers on every client first, then press Run all.</div>':'')}
 $('mres').innerHTML=h}
 async function runTest(){const mac=$('pc').value,ip=$('pip').value.trim(),k=$('pt').value;if((!mac&&!ip)||!k){$('tres').textContent='Select a client, or type its IP.';return}

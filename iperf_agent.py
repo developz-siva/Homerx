@@ -70,8 +70,8 @@ def lan_ip():
 class Agent:
     def __init__(self, iperf_port=5201, iperf_bin="iperf3", token=None, bind=None, slots=1):
         self.iperf_port, self.iperf_bin, self.token, self.bind = iperf_port, iperf_bin, token, bind
-        self.slots = max(1, min(int(slots), 32))                    # concurrent iperf3 servers on consecutive ports (several clients at once)
-        self.results, self.next_id = collections.deque(maxlen=200), 1
+        self.slots = max(1, min(int(slots), 64))                    # concurrent iperf3 servers on consecutive ports (several clients at once)
+        self.results, self.next_id = collections.deque(maxlen=400), 1
         self.slot, self.lock, self.procs, self.stopping = {}, threading.Lock(), {}, False     # port -> {"state", "error"} / running iperf3 process
 
     def ports(self): return [self.iperf_port + i for i in range(self.slots)]
@@ -135,10 +135,10 @@ class Agent:
                 "server_ip": self.bind or lan_ip(), "hostname": socket.gethostname(), "last_id": last,
                 "ports": self.ports(), "slots": self.slots, "slot_state": {str(k): v["state"] for k, v in self.slot.items()}}
 
-    def results_after(self, after):
+    def results_after(self, after, port=None):
         now = time.monotonic()
         with self.lock:
-            rs = [{"id": r["id"], "age_s": round(now - r["finished"], 1), "raw": r["raw"], "port": r.get("port")} for r in self.results if r["id"] > after]
+            rs = [{"id": r["id"], "age_s": round(now - r["finished"], 1), "raw": r["raw"], "port": r.get("port")} for r in self.results if r["id"] > after and (port is None or r.get("port") == port)]
             last = self.next_id - 1
         return {"results": rs, "last_id": last}
 
@@ -158,7 +158,9 @@ def make_server(agent, bind="0.0.0.0", port=8099):
             elif u.path == "/results":
                 try: after = int(qs.get("after", ["0"])[0])
                 except ValueError: after = 0
-                body = agent.results_after(after)
+                try: port = int(qs["port"][0]) if "port" in qs else None
+                except ValueError: port = None
+                body = agent.results_after(after, port)
             else: self.send_error(404); return
             data = json.dumps(body).encode()
             self.send_response(200); self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", str(len(data))); self.end_headers(); self.wfile.write(data)
@@ -168,7 +170,7 @@ def make_server(agent, bind="0.0.0.0", port=8099):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--iperf-port", type=int, default=5201, help="port the iperf3 server listens on (default 5201)")
-    ap.add_argument("--slots", type=int, default=8, help="how many clients can be tested at the same time: this many iperf3 servers on consecutive ports from --iperf-port (default 8, max 32)")
+    ap.add_argument("--slots", type=int, default=8, help="how many clients can be tested at the same time: this many iperf3 servers on consecutive ports from --iperf-port (default 8, max 64)")
     ap.add_argument("--iperf-bin", default="iperf3", help='iperf3 file or folder if it is not on PATH, e.g. --iperf-bin "C:\\tools\\iperf3"')
     ap.add_argument("--iperf-bind", metavar="IP", help="listen for iperf3 only on this local address (iperf3 -s -B); use it when this PC has several networks")
     ap.add_argument("--http-port", type=int, default=8099, help="port the dashboard reads results from (default 8099)")

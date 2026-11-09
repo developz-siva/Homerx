@@ -84,9 +84,12 @@ Click the status chip at the top (e.g. `● telnet · 192.168.1.254`) to reopen 
 
 ## Test several clients at the same time (and see if the bandwidth is good or bad)
 The **Test several clients at the same time** card (below the Traffic planner) lets you add one row per client: pick the client (or type its IP), what it is doing
-(4K video, Teams call, game, ...), the quality and the number of streams. **Run all** arms every row at once.
+(audio, video, 4K, Teams call, game, or a plain **iperf3** run), the quality and the number of streams. **Run all** arms every row at once.
+For 30-40 clients use **Add all connected clients**, then a **Quick fill** pattern (e.g. audio / video / 4K / Teams call repeating, or audio / iperf / video / game) and **Apply to all rows**;
+change any row by hand, and **Save** the whole set as a named scenario to rerun later (kept in this browser).
+iperf3 rows have no requirement to judge: they are extra load, and the other clients' verdicts show what that load does to them.
 
-- **Setup:** the iperf agent on the server PC runs one iperf3 server per client (`--slots 8` by default: ports 5201-5208; use `--slots 16` for more). Run `iperf_client.py`
+- **Setup:** the iperf agent on the server PC runs one iperf3 server per client (`--slots 8` by default: ports 5201-5208; for 40 clients use `--slots 40` and allow TCP ports 5201-5240 on the server PC's firewall; max 64). Run `iperf_client.py`
   on every client PC. Start the helpers first, then press Run all, so the tests overlap (the result says how many seconds they ran together).
 - **What each client is judged against:** the Mbps its own activity needs (the "Required" figure of the planner, e.g. 8 x 4K video = 200 Mbps).
   *Demand = exactly what each needs* asks each client for that rate (TCP `-b`, or UDP for real-time uploads) and checks it was delivered. *Flat out* lets TCP run unlimited and reports the headroom.
