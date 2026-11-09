@@ -11,24 +11,38 @@ import ipaddress, json, shlex, shutil, subprocess
 MODES = {"tcp_down": "TCP download (host → client)", "tcp_up": "TCP upload (client → host)",
          "udp_down": "UDP download (host → client)", "udp_up": "UDP upload (client → host)"}
 
+BAD = {}                                                    # candidate path -> why it cannot be run
+
+def _runs(p):
+    """True if `p --version` can be started. A file that exists but is not a program for this OS (WinError 193) is skipped, and remembered in BAD."""
+    import subprocess
+    try: subprocess.run([p, "--version"], capture_output=True, timeout=10); return True
+    except subprocess.TimeoutExpired: return True
+    except OSError as e: BAD[p] = str(e); return False
+
+def bad_hint():
+    if not BAD: return ""
+    p, why = next(iter(BAD.items()))
+    return (f" Found {p} but it cannot be run ({why})." + (" That is not a Windows program: download the Windows build of iperf3 (iperf3.exe with its cygwin1.dll), not a Linux/macOS file or a source zip." if "193" in why else ""))
+
 def find_iperf3(explicit=None):
     """Locate iperf3: an explicit file or folder, PATH, $IPERF3_PATH, beside this script, the current folder, then usual install places.
     Returns a full path, or None."""
     import glob, os
-    names = ["iperf3.exe", "iperf3"] if os.name == "nt" else ["iperf3"]
+    names = ["iperf3.exe"] if os.name == "nt" else ["iperf3"]
     def pick(d):
         for n in names:
             p = os.path.join(d, n)
-            if os.path.isfile(p): return p
+            if os.path.isfile(p) and _runs(p): return p
         return None
     if explicit and explicit != "iperf3":
         explicit = os.path.expandvars(os.path.expanduser(explicit))
         if os.path.isdir(explicit): return pick(explicit)
-        if os.path.isfile(explicit): return explicit
+        if os.path.isfile(explicit): return explicit if _runs(explicit) else None
         w = shutil.which(explicit)
-        return w
+        return w if w and _runs(w) else None
     w = shutil.which("iperf3")
-    if w: return w
+    if w and _runs(w): return w
     home = os.path.expanduser("~")
     dirs = [os.environ.get("IPERF3_PATH", ""), os.path.dirname(os.path.abspath(__file__)), os.getcwd(), "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin",
             r"C:\iperf3", r"C:\iperf", r"C:\tools\iperf3", r"C:\Program Files\iperf3", r"C:\Program Files (x86)\iperf3", os.path.join(home, "iperf3")]
@@ -37,7 +51,7 @@ def find_iperf3(explicit=None):
         if d and os.path.isdir(d):
             p = pick(d) or pick(os.path.join(d, "bin"))
             if p: return p
-        elif d and os.path.isfile(d): return d
+        elif d and os.path.isfile(d) and _runs(d): return d
     return None
 
 def iperf3_argv(ip, mode, secs, streams, rate_mbps, port=5201, bind=None):
@@ -130,7 +144,7 @@ def run_iperf3(ip, mode, secs=10, streams=1, rate_mbps=50, runner=None, port=520
         else:
             exe = find_iperf3(iperf_bin)
             if not exe:
-                return {"ok": False, "error": "iperf3 was not found on this machine" + (f" at {iperf_bin}" if iperf_bin else "") + ". Searched PATH, this folder and the usual install folders. "
+                return {"ok": False, "error": "iperf3 was not found on this machine" + (f" at {iperf_bin}" if iperf_bin else "") + "." + bad_hint() + " Searched PATH, this folder and the usual install folders. "
                         "Point to it with --iperf-bin \"C:\\path\\to\\iperf3.exe\" (a file or its folder), or install it (macOS: brew install iperf3 · Windows: https://iperf.fr/iperf-download.php · Linux: apt install iperf3)."}
             argv[0] = exe
             out = subprocess.run(argv, capture_output=True, text=True, timeout=secs + 30).stdout

@@ -211,6 +211,12 @@ class FindIperf3(unittest.TestCase):
         d = tempfile.mkdtemp(); p = self._fake(d)
         self.assertEqual(s.find_iperf3(p), p); self.assertEqual(s.find_iperf3(d), p); self.assertIsNone(s.find_iperf3(os.path.join(d, "nope")))
         for mod in (ag, ic): self.assertEqual(mod.find_iperf3(d), p)                                     # the agent and the client carry their own copy
+    def test_a_file_that_is_not_a_program_is_skipped_with_a_reason(self):
+        d = tempfile.mkdtemp(); bad = os.path.join(d, "iperf3"); open(bad, "wb").write(b"\x7fELF-not-really"); os.chmod(bad, 0o755)   # exec format error, like WinError 193
+        good = tempfile.mkdtemp(); p = self._fake(good)
+        for mod in (s, ag, ic):
+            mod.BAD.clear(); self.assertIsNone(mod.find_iperf3(d)); self.assertIn(bad, mod.BAD); self.assertIn("cannot be run", mod.bad_hint())
+        self.assertIsNone(s.find_iperf3(bad)); self.assertEqual(s.find_iperf3(good), p)
     def test_env_and_current_folder(self):
         d = tempfile.mkdtemp(); p = self._fake(d); old_env, old_cwd, old_path = os.environ.get("IPERF3_PATH"), os.getcwd(), os.environ["PATH"]
         try:
