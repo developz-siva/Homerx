@@ -84,6 +84,44 @@ class Connect(unittest.TestCase):
     def test_tests_need_a_connection(self):
         self.assertIn("Not connected", self.mon.start_test({"mac": "x", "traffic": "video"})["error"])
 
+def fake_sshd(user="root", password="pw"):
+    """Tiny password-only SSH server (paramiko) that runs each exec request in a real shell."""
+    import paramiko, subprocess
+    key = paramiko.RSAKey.generate(2048); lsock = socket.socket(); lsock.bind(("127.0.0.1", 0)); lsock.listen(5); lsock.settimeout(0.3); st = {"stop": False}
+    class Srv(paramiko.ServerInterface):
+        def check_auth_password(self, u, p): return paramiko.AUTH_SUCCESSFUL if (u, p) == (user, password) else paramiko.AUTH_FAILED
+        def get_allowed_auths(self, u): return "password"
+        def check_channel_request(self, kind, cid): return paramiko.OPEN_SUCCEEDED if kind == "session" else paramiko.OPEN_FAILED_ADMINISTRATIVELY_PROHIBITED
+        def check_channel_exec_request(self, ch, cmd):
+            def go():
+                o = subprocess.run(["sh", "-c", cmd.decode()], capture_output=True).stdout; ch.sendall(o); ch.send_exit_status(0); ch.shutdown(socket.SHUT_RDWR); ch.close()
+            threading.Thread(target=go, daemon=True).start(); return True
+    def serve():
+        while not st["stop"]:
+            try: c, _ = lsock.accept()
+            except OSError: continue
+            tr = paramiko.Transport(c); tr.add_server_key(key)
+            try: tr.start_server(server=Srv())
+            except Exception: pass
+    threading.Thread(target=serve, daemon=True).start()
+    return lsock.getsockname()[1], st
+
+class SshPassword(unittest.TestCase):
+    def setUp(self):
+        try: import paramiko  # noqa
+        except ImportError: self.skipTest("paramiko not installed")
+        self.port, self.st = fake_sshd(); self.mon = wm.Monitor(None, 5)
+    def tearDown(self): self.st["stop"] = True; self.mon.disconnect()
+    def test_runner_runs_commands_with_a_password(self):
+        from transport import SshPasswordRunner
+        r = SshPasswordRunner("127.0.0.1", "root", self.port, "pw"); self.assertEqual(r.run("echo hi").strip(), "hi"); r.close()
+    def test_wrong_password_is_reported(self):
+        r = self.mon.connect({"transport": "ssh", "host": "127.0.0.1", "port": str(self.port), "user": "root", "password": "nope", "backend": "iw"})
+        self.assertFalse(r["ok"]); self.assertIn("rejected", r["error"])
+    def test_dashboard_connect_over_ssh_password(self):
+        r = self.mon.connect({"transport": "ssh", "host": "127.0.0.1", "port": str(self.port), "user": "root", "password": "pw", "backend": "iw", "ifaces": "wlan0", "mem_mode": "same"})
+        self.assertTrue(r["ok"], r); self.assertEqual(self.mon.conn["info"]["transport"], "ssh"); self.assertIsNotNone(self.mon.mem)
+
 class Http(unittest.TestCase):
     def setUp(self):
         s = socket.socket(); s.bind(("127.0.0.1", 0)); self.port = s.getsockname()[1]; s.close()

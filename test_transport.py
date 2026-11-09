@@ -1,4 +1,4 @@
-import json, os, pty, select, subprocess, threading, unittest, tempfile
+import json, os, pty, select, subprocess, threading, time, unittest, tempfile
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import transport as t, wifi_monitor as w
 from test_parsers import STA, SURVEY, IW_DEV
@@ -38,6 +38,39 @@ class SerialT(unittest.TestCase):
             self.assertEqual(be.survey("wlan1")["busy"], 2500)
             long = "echo " + "x" * 300                       # long command line (console may wrap/redraw)
             self.assertEqual(r.run(long).strip(), "x" * 300)
+        finally: ser.close()
+
+class CliSerial:
+    """Console that logs in to a restricted 'foo>' CLI; only `sh` gets a real shell (the router case: '>' until you type sh)."""
+    def __init__(self, env, allow_sh=True):
+        self.sh = PtySerial(env); self.shell, self.q, self.sent, self.allow_sh = False, b"foo> ", [], allow_sh
+    def write(self, b):
+        self.sent.append(b.decode())
+        if self.shell: return self.sh.write(b)
+        if b.decode().strip() == "sh" and self.allow_sh: self.shell = True; self.sh.reset_input_buffer(); self.sh.write(b"\n")
+        else: self.q += b"\r\nfoo> "
+    def read(self, n):
+        if self.shell: return self.sh.read(n)
+        q, self.q = self.q, b""; time.sleep(0.05) if not q else None; return q
+    def reset_input_buffer(self):
+        if self.shell: self.sh.reset_input_buffer()
+        else: self.q = b""
+    def close(self): self.sh.close()
+
+class CliPrompt(unittest.TestCase):
+    ENV = {"PATH": "/usr/bin:/bin", "TERM": "dumb"}
+    def test_prompt_detection(self):
+        self.assertTrue(t.at_cli_prompt("\r\nfoo> ")); self.assertFalse(t.at_cli_prompt("root@ap:/# ")); self.assertFalse(t.at_cli_prompt("~ $ ")); self.assertFalse(t.at_cli_prompt(""))
+    def test_serial_types_sh_automatically(self):
+        ser = CliSerial(self.ENV)
+        try:
+            r = t.SerialRunner(None, _serial=ser); self.assertTrue(ser.shell, ser.sent)
+            self.assertEqual(r.run("echo hello").strip(), "hello")
+        finally: ser.close()
+    def test_serial_custom_shell_command_and_none(self):
+        ser = CliSerial(self.ENV, allow_sh=False)
+        try:
+            t.SerialRunner(None, _serial=ser, shell_cmd="none"); self.assertFalse(any(x.strip() == "sh" for x in ser.sent))
         finally: ser.close()
 
 class H(BaseHTTPRequestHandler):

@@ -78,7 +78,8 @@ enter them. The same panel sets up **memory collection** (over the same connecti
 Click the status chip at the top (e.g. `● telnet · 192.168.1.254`) to reopen the panel, change the connection, or Disconnect.
 - Passwords are used for the session only and are never saved; the other fields are remembered in `<log-dir>/connection.json`.
 - The connection can only be changed from the PC running the dashboard (loopback), never from another machine.
-- Serial "Access is denied": another program (PuTTY, Tera Term) has the port open - close it. SSH here is key-login only; with just a password use Telnet or Serial.
+- Serial "Access is denied": another program (PuTTY, Tera Term) has the port open - close it. SSH: leave Password blank to use your SSH key, or type the password (needs `pip install paramiko`).
+- Console lands at a `>` prompt (restricted CLI) instead of `#`? For Serial and Telnet the tool types `sh` automatically when the prompt ends in `>`. Use the **Shell command** field for a different command (e.g. `shell`), or `none` to skip.
 - All the old command-line options still work (`--transport`, `--host`, `--serial-port`, ...); `--setup` forces the panel even when they are given.
 
 ## Reaching the AP: SSH, telnet, serial console, or web API (--transport)

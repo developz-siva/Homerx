@@ -25,7 +25,44 @@ class Runner:
         except Exception as e:
             _warn(f"`{cmd}` failed: {e}"); return ""
 
+class SshPasswordRunner:
+    """ssh with a password (or key passphrase) using paramiko (pip install paramiko): one persistent connection, reconnects once per call."""
+    def __init__(self, host, user="root", port=22, password=None, _connect=True):
+        try: import paramiko
+        except ImportError: raise ConnectionError("SSH with a password needs paramiko on this PC:  pip install paramiko   (or use key login, Telnet or Serial)")
+        self.host, self.user, self.port, self.password, self.c, self._lock = host, user, port, password, None, threading.Lock()
+        if _connect: self._open()
+    def _open(self):
+        import paramiko
+        self.close()
+        c = paramiko.SSHClient(); c.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        try: c.connect(self.host, self.port, self.user, self.password, timeout=8, banner_timeout=8, auth_timeout=10, allow_agent=False, look_for_keys=False)
+        except paramiko.AuthenticationException: raise ConnectionError(f"ssh login to {self.host} was rejected - check the user name and password")
+        except Exception as e: raise ConnectionError(f"ssh to {self.host}:{self.port} failed: {e}")
+        c.get_transport().set_keepalive(20); self.c = c
+    def close(self):
+        try:
+            if self.c: self.c.close()
+        except Exception: pass
+        self.c = None
+    def run(self, cmd, timeout=15):
+        with self._lock:
+            for attempt in (0, 1):
+                try:
+                    if self.c is None or not self.c.get_transport() or not self.c.get_transport().is_active(): self._open()
+                    _i, o, _e = self.c.exec_command(cmd, timeout=timeout)
+                    o.channel.settimeout(timeout)
+                    return o.read().decode("utf-8", "replace")
+                except Exception as e:
+                    self.close()
+                    if attempt: _warn(f"`{cmd}` failed: {e}"); return ""
+
 ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b[()][A-Z0-9]")
+
+def at_cli_prompt(text):
+    """True when the last line looks like a restricted CLI prompt ('>') rather than a root shell ('#' / '$')."""
+    lines = [l.strip() for l in ANSI.sub("", text).replace("\r", "").split("\n") if l.strip()]
+    return bool(lines) and lines[-1].endswith(">") and not lines[-1].endswith(("->", "=>"))
 
 class SerialRunner:
     """Send `cmd; echo <marker>` on the console and read until the marker. The marker is typed with '' inside it so that an
@@ -34,7 +71,7 @@ class SerialRunner:
     def close(self):
         try: self.s.close()
         except Exception: pass
-    def __init__(self, port, baud=115200, user=None, password=None, _serial=None):
+    def __init__(self, port, baud=115200, user=None, password=None, _serial=None, shell_cmd=None):
         if _serial is None:
             try: import serial
             except ImportError: raise ConnectionError("serial transport needs pyserial:  pip install pyserial")
@@ -46,6 +83,7 @@ class SerialRunner:
                 raise ConnectionError(f"cannot open {port}: {m}{hint}")
         self.s, self.lock, self.n = _serial, threading.Lock(), 0
         self._login(user, password)
+        self._enter_shell(shell_cmd)
         self._raw("stty -echo 2>/dev/null; PS1=''\n", 1.0)
 
     def _drain(self, secs):
@@ -55,6 +93,11 @@ class SerialRunner:
             if c: buf += c; end = max(end, time.time() + 0.3)
         return buf.decode(errors="replace")
     def _raw(self, text, wait): self.s.write(text.encode()); return self._drain(wait)
+    def _enter_shell(self, shell_cmd):
+        """Many consoles log in to a '>' CLI and need `sh` (or similar) to get the '#' shell. shell_cmd: None/'' = automatic ('sh' when the prompt ends in '>'), 'none' = never."""
+        if (shell_cmd or "").lower() == "none": return
+        out = self._raw("\n", 1.0)
+        if shell_cmd or at_cli_prompt(out): self._raw((shell_cmd or "sh") + "\n", 1.5)
     def _login(self, user, password):
         out = self._raw("\n", 1.5).lower()
         if "login:" in out:
@@ -89,8 +132,8 @@ IAC, DONT, DO, WONT, WILL, SB, SE = 255, 254, 253, 252, 251, 250, 240
 class TelnetRunner:
     """Telnet client without telnetlib (removed in Python 3.13). Refuses every option, handles an optional login, then
     runs commands the same marker way as SerialRunner. Reconnects once per call if the connection was lost."""
-    def __init__(self, host, port=23, user=None, password=None, connect_timeout=8):
-        self.host, self.port, self.user, self.password, self.ct = host, int(port), user, password, connect_timeout
+    def __init__(self, host, port=23, user=None, password=None, connect_timeout=8, shell_cmd=None):
+        self.host, self.port, self.user, self.password, self.ct, self.shell_cmd = host, int(port), user, password, connect_timeout, shell_cmd
         self.sock, self.lock, self.n, self._iac = None, threading.Lock(), 0, b""
         self._connect()
 
@@ -144,7 +187,9 @@ class TelnetRunner:
                 self._send(self.password + "\n"); out = self._read(2.0).lower()
             else: break
         if any(w in out for w in ("login incorrect", "login failed", "access denied", "authentication fail")): raise ConnectionError("login was rejected")
-        self._send("\n"); self._read(0.8)
+        self._send("\n"); prompt = self._read(0.8)
+        if (self.shell_cmd or "").lower() != "none" and (self.shell_cmd or at_cli_prompt(prompt)):
+            self._send((self.shell_cmd or "sh") + "\n"); self._read(1.2)
         self._send("stty -echo 2>/dev/null; PS1=''\n"); self._read(0.8)
     def close(self):
         try:

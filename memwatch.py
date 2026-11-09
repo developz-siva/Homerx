@@ -560,9 +560,9 @@ def serve(col, bind, port, allow_remote=False):
 
 def make_runner(transport, host, port=None, user=None, password=None):
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from transport import Runner, TelnetRunner
+    from transport import Runner, SshPasswordRunner, TelnetRunner
     if transport == "local": return Runner(None)
-    if transport == "ssh": return Runner(host, user or "root", port or 22)
+    if transport == "ssh": return SshPasswordRunner(host, user or "root", port or 22, password) if password else Runner(host, user or "root", port or 22)
     return TelnetRunner(host, port or 23, user, password)
 
 def add_cli_args(ap, prefix=""):

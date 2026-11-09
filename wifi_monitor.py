@@ -17,7 +17,7 @@ import argparse, csv, json, os, random, re, shlex, socket, subprocess, sys, thre
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import discovery, memwatch, planner, speedtools
-from transport import Runner, SerialRunner, TelnetRunner, UbusHttpRunner
+from transport import Runner, SerialRunner, SshPasswordRunner, TelnetRunner, UbusHttpRunner
 from urllib.parse import urlparse, parse_qs
 from advisor import advise, advise_radio, resolve_type, norm_type, PROFILES
 
@@ -368,10 +368,10 @@ def make_ap_runner(cfg):
     try:
         if t == "serial":
             if not (cfg.get("serial_port") or "").strip(): raise ConnectionError("choose the serial port (for example COM6, or /dev/cu.usbserial-0001)")
-            return SerialRunner(cfg["serial_port"].strip(), int(cfg.get("baud") or 115200), user, pw)
+            return SerialRunner(cfg["serial_port"].strip(), int(cfg.get("baud") or 115200), user, pw, shell_cmd=(cfg.get("shell_cmd") or "").strip() or None)
         if t == "telnet":
             if not host: raise ConnectionError("enter the device's IP address for telnet")
-            return TelnetRunner(host, port or 23, user, pw)
+            return TelnetRunner(host, port or 23, user, pw, shell_cmd=(cfg.get("shell_cmd") or "").strip() or None)
         if t == "ubus":
             if not (cfg.get("http_url") or "").strip(): raise ConnectionError("enter the web address of the device, e.g. http://192.168.1.1")
             return UbusHttpRunner(cfg["http_url"].strip(), user or "root", pw or "")
@@ -379,11 +379,12 @@ def make_ap_runner(cfg):
             if not host:
                 if cfg.get("ssh_local") and os.name != "nt": return Runner(None)       # CLI only: dashboard is running on the AP itself
                 raise ConnectionError("enter the device's IP address for SSH (leaving it blank would run the commands on this PC, which has no Wi-Fi AP tools)")
+            if pw: return SshPasswordRunner(host, user or "root", port or 22, pw)      # password login (needs paramiko)
             r = subprocess.run(["ssh", "-p", str(port or 22), "-o", "BatchMode=yes", "-o", "ConnectTimeout=6", f"{user or 'root'}@{host}", "echo wm_ok"],
                                capture_output=True, text=True, timeout=20)
             if "wm_ok" not in r.stdout:
                 err = (r.stderr or "").strip().splitlines()[-1:] or ["no answer"]
-                hint = " - SSH here uses key login (no password prompt); install your key on the device, or use Telnet / Serial" if "denied" in err[0].lower() else ""
+                hint = " - no key is installed on the device: enter the password here, or use Telnet / Serial" if "denied" in err[0].lower() else ""
                 raise ConnectionError(f"ssh to {host} failed: {err[0]}{hint}")
             return Runner(host, user or "root", port or 22)
     except ConnectionError: raise
@@ -916,19 +917,20 @@ th{color:var(--mut);font-weight:500}.mut{color:var(--mut)}.tag{display:inline-bl
 <label data-t="telnet ssh">Port<input id=f_port style="min-width:80px"></label>
 <label data-t="ubus">Web address<input id=f_http_url placeholder="http://192.168.1.1"></label>
 <label data-t="serial telnet ssh ubus">User (if asked)<input id=f_user autocomplete=off></label>
-<label data-t="serial telnet ubus">Password<input id=f_password type=password autocomplete=new-password></label>
+<label data-t="serial telnet ssh ubus">Password<input id=f_password type=password autocomplete=new-password></label>
+<label data-t="serial telnet">Shell command (blank = auto)<input id=f_shell_cmd placeholder="sh  (none = skip)" style="min-width:150px"></label>
 <label data-t="local">LAN to scan<input id=f_subnet placeholder="192.168.1.0/24"></label>
 <label data-t="serial telnet ubus">Max flows/poll<input id=f_max_flows placeholder="default" style="min-width:90px"></label>
 </div>
 <div class=mut data-t="serial" style="margin:-4px 0 10px"><button type=button onclick="ports()">Refresh ports</button> <span id=portmsg></span> &nbsp;Close PuTTY / Tera Term first: only one program can hold a serial port.</div>
-<div class=mut data-t="ssh" style="margin:-4px 0 10px">SSH uses key login (no password prompt). If you only have a password, use Telnet or Serial.</div>
+<div class=mut data-t="ssh" style="margin:-4px 0 10px">SSH: leave Password blank to use your SSH key, or enter the password (needs <code>pip install paramiko</code> on this PC).</div>
 <h2 style="margin-top:6px">Memory collection (optional)</h2>
 <div class=ctl>
 <label>Collect memory via<select id=f_mem_mode><option value=off>Off</option><option value=same>Same connection as above</option><option value=telnet>Separate telnet login</option><option value=ssh>Separate SSH login</option></select></label>
 <label data-m="telnet ssh">Device IP (blank = same)<input id=f_mem_host></label>
 <label data-m="telnet ssh">Port<input id=f_mem_port style="min-width:80px"></label>
-<label data-m="telnet">User (if asked)<input id=f_mem_user autocomplete=off></label>
-<label data-m="telnet">Password<input id=f_mem_password type=password autocomplete=new-password></label>
+<label data-m="telnet ssh">User (if asked)<input id=f_mem_user autocomplete=off></label>
+<label data-m="telnet ssh">Password<input id=f_mem_password type=password autocomplete=new-password></label>
 <label data-m="same telnet ssh">Every (s)<input id=f_mem_interval value=60 style="min-width:80px"></label>
 <label data-m="same telnet ssh">Name on graphs<input id=f_mem_label></label></div>
 <h2 style="margin-top:6px">Throughput tests (optional)</h2>
@@ -950,7 +952,7 @@ th{color:var(--mut);font-weight:500}.mut{color:var(--mut)}.tag{display:inline-bl
 <div class=card><h2>Insights &amp; recommendations</h2><div id=ins></div></div>
 <div class=card><h2>Clients</h2><table id=t></table></div>
 <script>
-const FIELDS=['transport','backend','ifaces','serial_port','baud','host','port','user','password','http_url','subnet','max_flows','mem_mode','mem_host','mem_port','mem_user','mem_password','mem_interval','mem_label','iperf_server','iperf_token'];
+const FIELDS=['transport','backend','ifaces','serial_port','baud','host','port','user','password','shell_cmd','http_url','subnet','max_flows','mem_mode','mem_host','mem_port','mem_user','mem_password','mem_interval','mem_label','iperf_server','iperf_token'];
 const $f=i=>document.getElementById('f_'+i);let connOpened=false;
 function vis(){const t=$f('transport').value,m=$f('mem_mode').value,d={serial:'115200',telnet:'23',ssh:'22'};
 document.querySelectorAll('[data-t]').forEach(e=>e.style.display=e.dataset.t.split(' ').includes(t)?'':'none');
