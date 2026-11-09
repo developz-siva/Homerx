@@ -65,6 +65,8 @@ class T(unittest.TestCase):
         self.assertEqual((d["ap_tx_mbps"], d["rssi"]), (866.667, -52))
         c = w.parse_wl_chanim("chanspec tx inbss obss nocat nopkt doze txop goodtx badtx glitch badplcp knoise timestamp\n0xe06a 2 10 5 3 4 0 76 1 1 1 1 -90 1\n")
         self.assertEqual(c["util_pct"], 24.0)
+        real = "version: 4\nchspec       tx      inbss   obss    nocat   nopkt   doze    txop    goodtx  badtx   glitch  badplcp knoise  idle    busy    timestamps\n36/160       2       1       18      10      6       0       66      1       1       126     3       -91     67      34      12508982\n"
+        c = w.parse_wl_chanim(real); self.assertEqual((c["util_pct"], c["tx_pct"], c["other_pct"]), (34.0, 2.0, 18.0))
 
 if __name__ == "__main__":
     unittest.main()

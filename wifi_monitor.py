@@ -180,12 +180,15 @@ def parse_wl_chanspec(text):
     return ("6G" if m.group(1) == "6" else ("2.4G" if ch <= 14 else "5G")), ch, int(m.group(3)) if m.group(3) else None
 
 def parse_wl_chanim(text):
+    """`wl chanim_stats` (header says chanspec or chspec; some builds also have idle/busy columns, others only txop)."""
     lines = [l.split() for l in text.splitlines() if l.strip()]
     for i, l in enumerate(lines):
-        if l and l[0] == "chanspec" and i + 1 < len(lines):
+        if l and l[0] in ("chanspec", "chspec") and i + 1 < len(lines):
             row = dict(zip(l, lines[i + 1]))
             try:
-                busy = 100 - float(row["txop"])
+                if "busy" in row: busy = float(row["busy"])
+                elif "idle" in row: busy = 100 - float(row["idle"])
+                else: busy = 100 - float(row["txop"])
                 return {"util_pct": round(busy, 1), "tx_pct": float(row.get("tx", 0)),
                         "rx_pct": float(row.get("inbss", 0)), "other_pct": float(row.get("obss", 0))}
             except (KeyError, ValueError):
