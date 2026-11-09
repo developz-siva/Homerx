@@ -438,7 +438,7 @@ class Monitor:
         self.rssi_hist, self.mix_hist = {}, {}
         self.prev_surv, self.prev_flow, self.prev_sta = {}, None, {}
         self.last_t = None
-        self.test, self.iperf_from, self.allow_remote_tests, self.iperf_port = None, "host", False, 5201
+        self.test, self.tests, self.iperf_from, self.allow_remote_tests, self.iperf_port = None, [], "host", False, 5201
         self.iperf_src, self.bind_client, self.iperf_bin = None, True, None      # iperf_src: -B for tests run from the dashboard; bind_client: put -B <client IP> in the client command
         self.iperf_server, self.iperf_token, self.iperf_server_ip, self.arm_timeout = None, None, None, 180
         self.mem = None                                         # memwatch.MemCollector when --mem-host is given      # server-PC mode: base URL of iperf_agent.py
@@ -534,8 +534,7 @@ class Monitor:
             self.state = {"ts": now, "interval": self.interval, "radios": radios, "clients": clients, "lan": list(lan.values()), "not_associated": missing,
                           "summary": {"clients": len(clients), "active": sum(c["active"] for c in clients),
                                       "mbps_by_class": by_class}}
-        t = self.test
-        if t and t["state"] in ("running", "waiting"):          # sample the tested client's link while the test runs (or is armed)
+        for t in self.active():                                  # sample each tested client's link while its test runs (or is armed)
             c = next((c for c in clients if c["mac"] == t["mac"]), None)
             if c:
                 r = radio_by_if.get(c["iface"], {})
@@ -560,9 +559,10 @@ class Monitor:
           ["ts", "mac", "host", "iface", "band", "rssi", "ap_tx_phy_mbps", "sta_tx_phy_mbps",
            "up_mbps", "down_mbps", "retry_pct", "active", "top_class", "top_app", "type", "advice"])
 
+    def active(self): return [t for t in self.tests if t["state"] in ("running", "waiting")]
+
     def sleep_for(self):          # sample faster (every <=2 s) while a throughput test is running
-        t = self.test
-        return min(self.interval, 2.0) if t and t["state"] in ("running", "waiting") else self.interval
+        return min(self.interval, 2.0) if self.active() else self.interval
 
     def loop(self):
         while True:
@@ -577,7 +577,7 @@ class Monitor:
     def start_test(self, req):
         if self.be is None: return {"error": "Not connected to a device - open Connection and connect first."}
         with self.lock:
-            if self.test and self.test["state"] in ("running", "waiting"): return {"error": "A test is already running."}
+            if self.active(): return {"error": "A test is already running."}
             st = self.state
         mac, spec = req.get("mac", ""), planner.CATALOG.get(req.get("traffic", ""))
         if not spec or not spec.get("test"): return {"error": "That traffic type is not a measured test."}
@@ -609,15 +609,72 @@ class Monitor:
                  "util_before": next((r.get("util_pct") for r in st["radios"] if r["iface"] == client.get("iface")), None)}
             t["bind"] = ip if self.bind_client else None
             t["cmd"] = speedtools.client_cmd(sip, t["port"], t["mode"], secs, streams, rate, t["bind"])
-            self.test = t
+            self.test, self.tests = t, [t]
             threading.Thread(target=self._wait_test, args=(t,), daemon=True).start()
             return {"ok": True}
         t = {"state": "running", "tool": spec["test"], "mode": qd.get("mode"), "mac": mac, "ip": ip, "secs": secs, "streams": streams,
              "rate": rate, "started": time.time(), "samples": [], "result": None,
              "util_before": (next((r.get("util_pct") for r in st["radios"] if client and r["iface"] == client.get("iface")), None))}
-        self.test = t
+        self.test, self.tests = t, [t]
         threading.Thread(target=self._run_test, args=(t,), daemon=True).start()
         return {"ok": True}
+
+    def start_multi(self, req):
+        """Arm one test per row at the same time. Row = {mac | ip, traffic, quality, streams}. Each client is judged against the Mbps its own
+        traffic profile needs (planner), measured through its own iperf3 server slot on the server PC."""
+        if self.be is None: return {"error": "Not connected to a device - open Connection and connect first."}
+        if not self.iperf_server: return {"error": "Testing several clients at once needs the iperf agent: run iperf_agent.py on the server PC and start the dashboard with --iperf-server."}
+        items = req.get("items") or []
+        if not isinstance(items, list) or not 1 <= len(items) <= 32: return {"error": "Add between 1 and 32 clients."}
+        with self.lock:
+            if self.active(): return {"error": "A test is already running."}
+            st = self.state
+        try: secs = max(5, min(int(req.get("secs", 15)), 120))
+        except (TypeError, ValueError): return {"error": "Duration must be a number."}
+        demand = "max" if req.get("demand") == "max" else "target"
+        try: ag = self._agent("/status")
+        except Exception as e: return {"error": self._agent_err(e)}
+        if ag.get("state") == "error": return {"error": "The iperf3 server PC reports: " + (ag.get("last_error") or "error")}
+        ports = ag.get("ports") or [ag.get("iperf_port", 5201)]
+        if len(items) > len(ports): return {"error": f"The iperf agent serves {len(ports)} client(s) at a time. Restart it with --slots {len(items)} (or test fewer clients)."}
+        sip = self.iperf_server_ip or ag.get("server_ip")
+        if not sip: return {"error": "Could not work out the server PC's LAN IP; pass --iperf-server-ip."}
+        tests, seen = [], set()
+        for i, it in enumerate(items):
+            row = f"Client {i + 1}: "
+            key = it.get("traffic"); spec = planner.CATALOG.get(key)
+            if not spec or spec.get("test"): return {"error": row + "choose what this client will be doing (video, call, game, ...)."}
+            quality = it.get("quality") if it.get("quality") in spec["qualities"] else spec["default"]
+            try: n = max(1, min(int(it.get("streams", 1)), 20))
+            except (TypeError, ValueError): return {"error": row + "streams must be a number."}
+            mac, typed = it.get("mac") or "", str(it.get("ip") or "").strip()
+            client = self._find(st, mac) if mac and not typed else None
+            if typed:
+                try: import ipaddress; typed = str(ipaddress.ip_address(typed))
+                except ValueError: return {"error": row + f"'{typed}' is not a valid IP address."}
+                client = next((c for c in st["clients"] + st.get("lan", []) if typed in (c.get("ips") or [])), None) or {"mac": "ip:" + typed, "ips": [typed], "host": "", "iface": None}
+            if not client or not client.get("ips"): return {"error": row + "choose a client that shows an IP, or type its IP."}
+            ip = client["ips"][0]
+            if ip in seen: return {"error": row + f"{ip} is already in the list."}
+            seen.add(ip)
+            need = planner.plan(None, key, quality, n)["required"]
+            dl = need["down_mbps"] >= need["up_mbps"]
+            req_mbps = max(0.05, need["down_mbps"] if dl else need["up_mbps"])
+            udp = bool(spec.get("rt")) and not dl                  # real-time uploads: UDP, so the server can measure loss + jitter
+            mode = ("udp_" if udp else "tcp_") + ("down" if dl else "up")
+            rate = round(req_mbps * (1.5 if demand == "max" else 1.0), 3) if udp else req_mbps
+            tcp_rate = req_mbps if (demand == "target" and not udp) else None
+            t = {"state": "waiting", "tool": "iperf3", "mode": mode, "mac": client["mac"], "ip": ip, "ips": list(client["ips"]), "host": client.get("host") or "", "secs": secs, "streams": 1,
+                 "rate": rate, "started": time.time(), "samples": [], "result": None, "server": True, "server_ip": sip, "port": ports[i], "after": ag.get("last_id", 0), "others": [],
+                 "cancel": False, "claimed": False, "deadline": time.time() + self.arm_timeout, "required": round(req_mbps, 2), "required_dir": "down" if dl else "up", "demand": demand,
+                 "tcp_rate": tcp_rate, "traffic": key, "label": f"{spec['label']} - {quality}" + (f" x{n}" if n > 1 else ""), "loss_limit": spec.get("loss_pct"), "jitter_limit": spec.get("jitter_ms"),
+                 "util_before": next((r.get("util_pct") for r in st["radios"] if r["iface"] == client.get("iface")), None)}
+            t["bind"] = ip if self.bind_client else None
+            t["cmd"] = speedtools.client_cmd(sip, t["port"], mode, secs, 1, rate, t["bind"], tcp_rate)
+            tests.append(t)
+        self.test, self.tests = tests[0], tests
+        for t in tests: threading.Thread(target=self._wait_test, args=(t,), daemon=True).start()
+        return {"ok": True, "count": len(tests)}
 
     def _agent(self, path):
         import urllib.request
@@ -643,6 +700,7 @@ class Monitor:
                 for x in r.get("results", []):
                     t["after"] = max(t["after"], x["id"])
                     p = speedtools.parse_iperf3_server(x["raw"])
+                    if t.get("port") and x.get("port") and x["port"] != t["port"]: continue      # another client's server slot
                     host = p.get("remote_host")
                     if not p.get("ok") and not host: continue          # aborted/garbled run: nothing to match
                     if host and host not in t["ips"]:
@@ -681,6 +739,7 @@ class Monitor:
             if t["tool"] == "iperf3" and t["mode"].startswith("udp"): res["target_mbps"] = res.get("target_mbps") or t["rate"]
             with self.lock: st = self.state
             res["insights"] = _test_insights(res, t)
+            res["verdict"] = _verdict(res, t)
             if self.log_dir: self._log_test(t, res)
         t["result"], t["finished"] = res, time.time()
         if self.mem and res.get("ok"):                           # show the test as a shaded window on the memory graphs
@@ -690,26 +749,36 @@ class Monitor:
             except Exception as e: sys.stderr.write(f"[warn] could not record the test on the memory graph: {e}\n")
         t["state"] = "done" if res.get("ok") else "error"
 
-    def test_status(self):
-        t = self.test
-        if not t: return {"state": "idle"}
+    def _one_status(self, t):
         out = {k: t[k] for k in ("state", "tool", "mode", "mac", "ip", "secs", "streams", "rate", "result")} | {
             "elapsed": round((t.get("finished") or time.time()) - t["started"]), "samples": len(t["samples"])}
-        if t.get("server"): out |= {"server": True, "cmd": t["cmd"], "server_ip": t["server_ip"], "others": t["others"], "remaining": max(0, round(t["deadline"] - time.time())), "claimed": t["claimed"]}
+        if t.get("server"): out |= {"server": True, "cmd": t["cmd"], "server_ip": t["server_ip"], "others": t["others"], "remaining": max(0, round(t["deadline"] - time.time())), "claimed": t["claimed"], "port": t.get("port")}
+        if t.get("required") is not None: out |= {"required": t["required"], "required_dir": t["required_dir"], "label": t["label"], "host": t.get("host", ""), "demand": t["demand"]}
         return out
+
+    def test_status(self):
+        if not self.tests: return {"state": "idle"}
+        if len(self.tests) == 1: return self._one_status(self.tests[0])
+        rows = [self._one_status(t) for t in self.tests]
+        states = [t["state"] for t in self.tests]
+        agg = "waiting" if "waiting" in states else "running" if "running" in states else "done"
+        return {"state": agg, "multi": True, "tests": rows, "summary": _multi_summary(self.tests) if agg == "done" else None,
+                "remaining": max([r.get("remaining", 0) for r in rows] or [0])}
 
     def pending_for(self, ip, ident=None):
         """What an iperf_client.py helper should do now. Matched on the requester's source IP, or on the Wi-Fi IP it states itself
         (`ident`) when it reaches the dashboard over another network (e.g. a management address)."""
-        t = self.test
-        if not (t and t.get("server") and t["state"] == "waiting" and (ip in t["ips"] or ident in t["ips"]) and not t["claimed"]): return {"pending": False}
-        t["claimed"] = True
-        return {"pending": True, "server_ip": t["server_ip"], "port": t["port"], "mode": t["mode"], "secs": t["secs"], "streams": t["streams"], "rate": t["rate"], "bind": t.get("bind")}
+        for t in self.tests:
+            if t.get("server") and t["state"] == "waiting" and (ip in t["ips"] or ident in t["ips"]) and not t["claimed"]:
+                t["claimed"] = True
+                return {"pending": True, "server_ip": t["server_ip"], "port": t["port"], "mode": t["mode"], "secs": t["secs"], "streams": t["streams"], "rate": t["rate"],
+                        "bind": t.get("bind"), "tcp_rate": t.get("tcp_rate")}
+        return {"pending": False}
 
     def cancel_test(self):
-        t = self.test
-        if t and t["state"] == "waiting": t["cancel"] = True; return {"ok": True}
-        return {"error": "No armed test to cancel."}
+        armed = [t for t in self.tests if t["state"] == "waiting"]
+        for t in armed: t["cancel"] = True
+        return {"ok": True} if armed else {"error": "No armed test to cancel."}
 
     def config(self):
         return {"iperf_server": bool(self.iperf_server)}
@@ -778,7 +847,7 @@ class Monitor:
         try: iv = int(cfg.get("mem_interval") or 60)
         except ValueError: iv = 60
         col = memwatch.MemCollector(mr, iv, self.mem_dir, (cfg.get("mem_label") or cfg.get("host") or "").strip())
-        col.fast_check = lambda: bool(self.test and self.test["state"] in ("running", "waiting"))
+        col.fast_check = lambda: bool(self.active())
         self.mem = col
         threading.Thread(target=col.loop, daemon=True).start()
 
@@ -833,6 +902,43 @@ def _summarise(samples, util_before=None):
     rssi, _ = stat("rssi"); aptx, _ = stat("ap_tx"); statx, _ = stat("sta_tx"); retry, rmax = stat("retry"); util, umax = stat("util")
     return {"n": len(samples), "rssi_avg": rssi, "ap_tx_avg": aptx, "sta_tx_avg": statx, "retry_avg": retry, "retry_max": rmax,
             "util_avg": util, "util_max": umax, "util_before": util_before}
+
+ORDER = ["GOOD", "MARGINAL", "BAD"]
+
+def _verdict(res, t):
+    """Is the measured bandwidth enough for what this client is doing? Needs t['required'] (Mbps of its traffic profile)."""
+    req = t.get("required")
+    if not req or res.get("tool") != "iperf3": return None
+    mbps = res.get("mbps") or 0; ratio = mbps / req; why = []; L = res.get("link") or {}
+    if t.get("demand") == "target":                                   # the client was asked for exactly what it needs: did it get it?
+        grade = "GOOD" if ratio >= 0.95 else "MARGINAL" if ratio >= 0.8 else "BAD"
+        why.append(f"Delivered {mbps:g} of the {req:g} Mbps this needs ({ratio * 100:.0f}%).")
+    else:                                                             # flat out: how many times over the requirement is the link?
+        grade = "GOOD" if ratio >= 1.5 else "MARGINAL" if ratio >= 1.0 else "BAD"
+        why.append(f"Reached {mbps:g} Mbps against {req:g} Mbps needed ({ratio:.1f}x headroom).")
+    def cap(worst):
+        nonlocal grade; grade = ORDER[max(ORDER.index(grade), ORDER.index(worst))]
+    loss, jit = res.get("loss_pct"), res.get("jitter_ms")
+    if loss is not None:
+        lim = t.get("loss_limit") or 1
+        if loss > 5: cap("BAD"); why.append(f"UDP loss {loss}% - real-time media would break up.")
+        elif loss > lim: cap("MARGINAL"); why.append(f"UDP loss {loss}% is above the ~{lim:g}% this traffic tolerates.")
+    if jit is not None and jit > (t.get("jitter_limit") or 30): cap("MARGINAL"); why.append(f"Jitter {jit} ms is above the ~{t.get('jitter_limit') or 30:g} ms guideline.")
+    if (L.get("retry_avg") or 0) >= 25: cap("MARGINAL"); why.append(f"Wi-Fi retries averaged {L['retry_avg']}% - the link is marginal (interference or distance).")
+    if (L.get("util_max") or 0) >= 85: why.append(f"The radio reached {L['util_max']}% busy: no airtime left for more.")
+    if t.get("required_dir") and loss is None and res["mode"].startswith("tcp") and (res.get("retransmits") or 0) > 200: why.append(f"{res['retransmits']} TCP retransmits (loss on the path).")
+    return {"grade": grade, "required": req, "measured": mbps, "ratio": round(ratio, 2), "reasons": why}
+
+def _multi_summary(tests):
+    done = [t for t in tests if t["state"] == "done" and (t.get("result") or {}).get("verdict")]
+    g = [t["result"]["verdict"]["grade"] for t in done]
+    wins = [t["win"] for t in done if t.get("win")]
+    overlap = round(min(w[1] for w in wins) - max(w[0] for w in wins), 1) if len(wins) > 1 else None
+    out = {"good": g.count("GOOD"), "marginal": g.count("MARGINAL"), "bad": g.count("BAD"), "no_result": len(tests) - len(done),
+           "measured_total": round(sum(t["result"]["verdict"]["measured"] for t in done), 1), "required_total": round(sum(t["required"] for t in tests), 1),
+           "overlap_s": overlap, "util_max": max([(t["result"].get("link") or {}).get("util_max") or 0 for t in done] or [0]) or None}
+    out["grade"] = "BAD" if (out["bad"] or out["no_result"]) else "MARGINAL" if out["marginal"] else "GOOD"
+    return out
 
 def _ins(sev, title, detail, action=""): return {"sev": sev, "title": title, "detail": detail, "action": action}
 
@@ -948,6 +1054,14 @@ th{color:var(--mut);font-weight:500}.mut{color:var(--mut)}.tag{display:inline-bl
 <label id=trl style="display:none">UDP target rate (Mbps)<input id=tr type=number value=50 min=0.1 step=any style="min-width:100px"></label>
 <label>&nbsp;<button id=tb style="font:inherit;padding:7px 16px;border-radius:6px;border:0;background:var(--a);color:#fff;cursor:pointer">Run test</button></label></div>
 <div id=tn class=mut style="margin-bottom:8px"></div><div id=tres></div></div></div>
+<div class=card id=mc><h2>Test several clients at the same time</h2>
+<div class=mut style="margin-bottom:8px">Choose what each client is doing. All tests start together, and every client is judged against the Mbps <b>its own</b> activity needs: GOOD, MARGINAL or BAD.
+Run <code>iperf_client.py</code> on each client PC (or paste the command shown for it). Needs the iperf agent (<code>--iperf-server</code>).</div>
+<table id=mt><tr><th>Client</th><th>Doing</th><th>Quality</th><th>&times;</th><th></th></tr></table>
+<div class=ctl style="margin-top:10px"><label>Duration (s)<input id=md type=number value=15 min=5 max=120 style="min-width:80px"></label>
+<label>Demand<select id=mdem><option value=target>Exactly what each needs</option><option value=max>Flat out (shows headroom)</option></select></label>
+<label>&nbsp;<span><button id=madd>+ Add client</button> <button id=mrun style="font:inherit;padding:7px 16px;border-radius:6px;border:0;background:var(--a);color:#fff;cursor:pointer">Run all</button></span></label></div>
+<div id=mres></div></div>
 <div class=grid id=radios></div><div class=card style="margin-top:14px"><h2>Traffic by class (Mbps)</h2><div id=cls></div></div>
 <div class=card><h2>Insights &amp; recommendations</h2><div id=ins></div></div>
 <div class=card><h2>Clients</h2><table id=t></table></div>
@@ -997,8 +1111,8 @@ function row(w,i){return '<div style="padding:3px 0 3px 8px;border-left:3px soli
 let CAT=null,SIG='';const $=id=>document.getElementById(id);
 function fillClients(s){const all=[...s.clients.map(c=>({mac:c.mac,t:(c.host||c.mac)+' · '+(c.ips||[]).join(',')+' · Wi-Fi '+c.band+' '+c.rssi+' dBm'})),
 ...(s.lan||[]).map(l=>({mac:l.mac,t:(l.host||l.mac)+' · '+l.ips.join(',')+' · wired/other'}))];
-const sig=JSON.stringify(all.map(a=>a.mac));if(sig===SIG)return;SIG=sig;const cur=$('pc').value;
-$('pc').innerHTML='<option value="">— select client —</option>'+all.map(a=>`<option value="${esc(a.mac)}">${esc(a.t)}</option>`).join('');$('pc').value=cur}
+window.CL=all;const sig=JSON.stringify(all.map(a=>a.mac));if(sig===SIG)return;SIG=sig;const cur=$('pc').value;
+$('pc').innerHTML='<option value="">— select client —</option>'+all.map(a=>`<option value="${esc(a.mac)}">${esc(a.t)}</option>`).join('');$('pc').value=cur;mfill()}
 function fillQual(){const k=$('pt').value;if(!CAT||!k)return;const c=CAT[k];$('pq').innerHTML=c.qualities.map(q=>`<option ${q===c.default?'selected':''}>${esc(q)}</option>`).join('')}
 const T=(v,l)=>`<div class=tile><b>${v}</b><span>${l}</span></div>`;
 async function plan(){const mac=$('pc').value,t=$('pt').value;if(!mac||!t){$('pr').innerHTML='<span class=mut>Select a client and a traffic type.</span>';return}
@@ -1014,15 +1128,42 @@ h+='</div><div class=mut style="line-height:1.6"><b>QoS:</b> WMM '+esc(r.qos.wmm
 let SRV=false;
 async function boot(){try{CAT=await (await fetch('api/catalog')).json();SRV=(await (await fetch('api/config')).json()).iperf_server}catch(e){return}
 $('pt').innerHTML='<option value="">— select traffic —</option>'+Object.entries(CAT).map(([k,v])=>`<option value="${k}">${esc(v.label)}</option>`).join('');
-$('pt').onchange=()=>{fillQual();testUI();plan()};$('pq').addEventListener('change',testUI);['pc','pq','pn'].forEach(i=>$(i).onchange=plan);$('pc').addEventListener('change',()=>{if($('pc').value)$('pip').value=''});$('tb').onclick=runTest;setInterval(tstat,1000)}
+$('pt').onchange=()=>{fillQual();testUI();plan()};$('pq').addEventListener('change',testUI);['pc','pq','pn'].forEach(i=>$(i).onchange=plan);$('pc').addEventListener('change',()=>{if($('pc').value)$('pip').value=''});$('tb').onclick=runTest;$('madd').onclick=maddRow;$('mrun').onclick=mrun;maddRow();maddRow();setInterval(tstat,1000)}
 function testUI(){const k=$('pt').value,c=CAT&&CAT[k];$('tp').style.display=c&&c.test?'block':'none';if(!c||!c.test)return;const m=c.modes[$('pq').value]||'',ip=c.test==='iperf3';
 $('tdl').style.display=ip?'':'none';$('tsl').style.display=ip?'':'none';$('trl').style.display=(ip&&m.startsWith('udp'))?'':'none';
 $('tn').textContent=ip&&SRV?"Server-PC mode: press Run test, then run the shown iperf3 command on the selected Wi-Fi client. Download = add -R. The result is tied to the client by its IP; link metrics are captured during the run.":ip?"Needs an iperf3 server on the selected client (run: iperf3 -s; phones have iperf3 apps) with port 5201 allowed. Download = host to client, upload = client to host. Link metrics are sampled about every 2 s while the test runs.":"Runs on the machine running this dashboard: it measures that machine's internet speed, not the selected client's."}
+
+function mtraffic(){return Object.entries(CAT||{}).filter(([k,v])=>!v.test).map(([k,v])=>`<option value="${k}">${esc(v.label)}</option>`).join('')}
+function mclients(){return '<option value="">— client —</option>'+(window.CL||[]).map(a=>`<option value="${esc(a.mac)}">${esc(a.t)}</option>`).join('')}
+function maddRow(){if(!CAT)return;const tr=document.createElement('tr');
+tr.innerHTML=`<td><select class=mc>${mclients()}</select> <input class=mip placeholder="or IP" style="min-width:110px;width:120px"></td><td><select class=mt>${mtraffic()}</select></td><td><select class=mq></select></td><td><input class=mn type=number value=1 min=1 max=20 style="min-width:60px;width:60px"></td><td><button class=mx>&#10005;</button></td>`;
+const q=tr.querySelector('.mq'),t=tr.querySelector('.mt'),fq=()=>{const c=CAT[t.value];q.innerHTML=(c?c.qualities:[]).map(x=>`<option value="${esc(x)}"${x===c.default?' selected':''}>${esc(x)}</option>`).join('')};
+t.onchange=fq;fq();tr.querySelector('.mx').onclick=()=>tr.remove();document.getElementById('mt').appendChild(tr)}
+function mfill(){document.querySelectorAll('#mt .mc').forEach(s=>{const v=s.value;s.innerHTML=mclients();s.value=v})}
+async function mrun(){const b=$('mrun');if(b.dataset.cancel){await fetch('api/test/cancel',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});return}
+const items=[...document.querySelectorAll('#mt tr')].slice(1).map(tr=>{const ip=tr.querySelector('.mip').value.trim();return {mac:ip?'':tr.querySelector('.mc').value,ip,traffic:tr.querySelector('.mt').value,quality:tr.querySelector('.mq').value,streams:+tr.querySelector('.mn').value}});
+if(!items.length){$('mres').innerHTML='<div class=hot>Add at least one client.</div>';return}
+let r;try{r=await (await fetch('api/test/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({items,secs:+$('md').value,demand:$('mdem').value})})).json()}catch(e){$('mres').textContent='Could not start the tests.';return}
+if(r.error){$('mres').innerHTML='<div class=hot>\u2716 '+esc(r.error)+'</div>';return}$('mres').textContent='Starting\u2026';tstat()}
+const GC={GOOD:'#12b76a',MARGINAL:'#f79009',BAD:'#d92d20'};
+function badge(g){return `<span style="display:inline-block;padding:2px 10px;border-radius:12px;color:#fff;font-weight:600;background:${GC[g]||'#667085'}">${esc(g)}</span>`}
+function mrender(s){const b=$('mrun'),wait=s.state==='waiting',run=s.state==='running';b.disabled=run;b.textContent=wait?'Cancel':run?'Running\u2026':'Run all';if(wait)b.dataset.cancel=1;else delete b.dataset.cancel;
+let h='<table style="margin-top:12px"><tr><th>Client</th><th>Doing</th><th>Needs</th><th>Got</th><th>Verdict</th><th>Details</th></tr>';
+s.tests.forEach(t=>{const r=t.result,v=r&&r.verdict,who=esc(t.host||t.ip)+(t.host?' <span class=mut>'+esc(t.ip)+'</span>':'');let got='',ver='',det='';
+if(t.state==='waiting'){ver='<span class=mut>'+(t.claimed?'running\u2026':'armed')+'</span>';det='<span class=mut>'+(t.claimed?'The client helper started it.':'Waiting for the client ('+t.remaining+'s). Run on it: ')+'</span>'+(t.claimed?'':'<code style="user-select:all">'+esc(t.cmd)+'</code>')}
+else if(t.state==='cancelled'){ver='<span class=mut>cancelled</span>'}
+else if(r&&!r.ok){ver=badge('BAD');det='<span class=hot>'+esc(r.error||'failed')+'</span>'}
+else if(r){got=r.mbps+' Mbps';ver=v?badge(v.grade):'';det=v?v.reasons.map(esc).join('<br>'):''}
+h+=`<tr><td>${who}</td><td>${esc(t.label)}</td><td>${t.required} Mbps ${t.required_dir==='down'?'\u2193':'\u2191'}</td><td>${got}</td><td>${ver}</td><td>${det}</td></tr>`});
+h+='</table>';const m=s.summary;
+if(m){h+=`<div style="margin-top:10px">${badge(m.grade)} <b>${m.good}</b> good, <b>${m.marginal}</b> marginal, <b>${m.bad+m.no_result}</b> bad/no result &middot; total ${m.measured_total} of ${m.required_total} Mbps needed`+(m.overlap_s!=null?` &middot; ran together for ${m.overlap_s}s`:'')+(m.util_max?` &middot; radio up to ${m.util_max}% busy`:'')+'</div>'
++(m.overlap_s!=null&&m.overlap_s<3?'<div class=hot>The tests barely overlapped - start the helpers on every client first, then press Run all.</div>':'')}
+$('mres').innerHTML=h}
 async function runTest(){const mac=$('pc').value,ip=$('pip').value.trim(),k=$('pt').value;if((!mac&&!ip)||!k){$('tres').textContent='Select a client, or type its IP.';return}
 if($('tb').dataset.cancel){await fetch('api/test/cancel',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});return}
 let r;try{r=await (await fetch('api/test/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mac:ip?'':mac,ip,traffic:k,quality:$('pq').value,secs:+$('td').value,streams:+$('tsn').value,rate:+$('tr').value})})).json()}catch(e){$('tres').textContent='Could not start the test.';return}
 if(r.error){$('tres').innerHTML='<div class=hot>✖ '+esc(r.error)+'</div>';return}$('tres').textContent='Starting…';tstat()}
-async function tstat(){let s;try{s=await (await fetch('api/test/status')).json()}catch(e){return}if(s.state==='idle')return;const wait=s.state==='waiting',run=s.state==='running';$('tb').disabled=run;$('tb').textContent=run?`Running… ${s.elapsed}s`:wait?'Cancel':'Run test';if(wait)$('tb').dataset.cancel=1;else delete $('tb').dataset.cancel;
+async function tstat(){let s;try{s=await (await fetch('api/test/status')).json()}catch(e){return}if(s.state==='idle')return;if(s.multi){mrender(s);return}const wait=s.state==='waiting',run=s.state==='running';$('tb').disabled=run;$('tb').textContent=run?`Running… ${s.elapsed}s`:wait?'Cancel':'Run test';if(wait)$('tb').dataset.cancel=1;else delete $('tb').dataset.cancel;
 if(wait){$('tres').innerHTML='<div class=hot style="color:inherit">⏳ <b>Armed — waiting for '+esc(s.ip)+'</b> ('+s.remaining+'s left). '+(s.claimed?'<b>The client helper picked it up and is running the test…</b> It would otherwise run:':'If the client runs iperf_client.py it starts by itself; otherwise run on that client:')+'<pre style="user-select:all;margin:6px 0">'+esc(s.cmd)+'</pre><span class=mut>Link metrics are being sampled ('+s.samples+' so far).'+(s.others&&s.others.length?' Ignored tests from '+esc(s.others.join(', '))+'.':'')+'</span></div>';return}
 if(s.state==='cancelled'){$('tres').innerHTML='<span class=mut>Cancelled.</span>';return}
 if(run){$('tres').innerHTML='<span class=mut>Test in progress. Sampling link metrics ('+s.samples+' so far)…</span>';return}renderTest(s)}
@@ -1072,7 +1213,7 @@ def serve(mon, bind, port):
             elif u.path == "/api/connect/test": body = json.dumps(mon.connect(req, test=True)).encode()
             elif u.path == "/api/disconnect": body = json.dumps(mon.disconnect()).encode()
             elif u.path == "/api/mem/event": body = json.dumps(memwatch.handle_post(mon.mem, u.path, req)).encode()
-            elif u.path == "/api/test/start": body = json.dumps(mon.start_test(req)).encode()
+            elif u.path == "/api/test/start": body = json.dumps(mon.start_multi(req) if "items" in req else mon.start_test(req)).encode()
             elif u.path == "/api/test/cancel": body = json.dumps(mon.cancel_test()).encode()
             else: self.send_error(404); return
             self.send_response(200); self.send_header("Content-Type", "application/json")

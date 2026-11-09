@@ -82,6 +82,18 @@ Click the status chip at the top (e.g. `● telnet · 192.168.1.254`) to reopen 
 - Console lands at a `>` prompt (restricted CLI) instead of `#`? For Serial and Telnet the tool types `sh` automatically when the prompt ends in `>`. Use the **Shell command** field for a different command (e.g. `shell`), or `none` to skip.
 - All the old command-line options still work (`--transport`, `--host`, `--serial-port`, ...); `--setup` forces the panel even when they are given.
 
+## Test several clients at the same time (and see if the bandwidth is good or bad)
+The **Test several clients at the same time** card (below the Traffic planner) lets you add one row per client: pick the client (or type its IP), what it is doing
+(4K video, Teams call, game, ...), the quality and the number of streams. **Run all** arms every row at once.
+
+- **Setup:** the iperf agent on the server PC runs one iperf3 server per client (`--slots 8` by default: ports 5201-5208; use `--slots 16` for more). Run `iperf_client.py`
+  on every client PC. Start the helpers first, then press Run all, so the tests overlap (the result says how many seconds they ran together).
+- **What each client is judged against:** the Mbps its own activity needs (the "Required" figure of the planner, e.g. 8 x 4K video = 200 Mbps).
+  *Demand = exactly what each needs* asks each client for that rate (TCP `-b`, or UDP for real-time uploads) and checks it was delivered. *Flat out* lets TCP run unlimited and reports the headroom.
+- **Verdict per client:** GOOD (>= 95% of the need delivered, or >= 1.5x headroom flat out), MARGINAL (80-95%, or 1.0-1.5x), BAD (below). Loss, jitter and heavy Wi-Fi retries can lower a verdict, and the reasons are listed.
+  UDP loss/jitter are only measurable for uploads (client to server); downloads are judged on delivered Mbps.
+- A summary line shows how many were good / marginal / bad, the total measured vs needed, and how busy the radio got.
+
 ## Reaching the AP: SSH, telnet, serial console, or web API (--transport)
 All backends (iw / wl / qca) work over any transport.
 

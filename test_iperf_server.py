@@ -76,7 +76,7 @@ class AgentEndToEnd(unittest.TestCase):
         self.assertEqual(st["mode"], "udp_down"); self.assertAlmostEqual(st["result"]["mbps"], 15, delta=1.5); self.assertIsNone(st["result"]["loss_pct"])
         self.assertTrue(any("loss and jitter are measured by the client" in i["title"] for i in st["result"]["insights"]))
     def test_other_clients_tests_are_ignored(self):
-        mon, mac = monitor(self.url, client_ip="10.9.9.9"); mon.arm_timeout = 5
+        mon, mac = monitor(self.url, client_ip="10.9.9.9"); mon.arm_timeout = 12
         mon.start_test({"mac": mac, "traffic": "iperf3", "quality": s.MODES["tcp_up"], "secs": 3})
         time.sleep(1); c = client(); c.wait(timeout=20)                                                    # arrives from 127.0.0.1, not 10.9.9.9
         self.assertTrue(wait_state(mon, ("error",), 45)); st = mon.test_status()
@@ -140,7 +140,7 @@ class ClientHelper(unittest.TestCase):
         be = w.SimBackend(w.Runner(None)); mac = be.cl[0][0]; be.ip_to_mac = lambda: {"192.168.1.77": mac}
         mon = w.Monitor(be, 1, None); mon.poll()
         self.assertEqual(mon.pending_for("192.168.1.77"), {"pending": False})
-        mon.test = {"state": "waiting", "server": True, "ips": ["192.168.1.77"], "server_ip": "192.168.1.3", "port": 5201, "mode": "tcp_down", "secs": 10, "streams": 1, "rate": 50, "claimed": False}
+        mon.test = {"state": "waiting", "server": True, "ips": ["192.168.1.77"], "server_ip": "192.168.1.3", "port": 5201, "mode": "tcp_down", "secs": 10, "streams": 1, "rate": 50, "claimed": False}; mon.tests = [mon.test]
         self.assertEqual(mon.pending_for("192.168.1.99"), {"pending": False})          # another device gets nothing
         j = mon.pending_for("192.168.1.77"); self.assertTrue(j["pending"]); self.assertEqual(j["mode"], "tcp_down")
         self.assertEqual(mon.pending_for("192.168.1.77"), {"pending": False})          # claimed: not started twice
@@ -173,7 +173,7 @@ class SourceBinding(unittest.TestCase):
     def test_pending_matches_the_stated_wifi_ip_when_polling_over_another_network(self):
         be = w.SimBackend(w.Runner(None)); mac = be.cl[0][0]; be.ip_to_mac = lambda: {"192.168.1.77": mac}
         mon = w.Monitor(be, 1, None); mon.poll()
-        mon.test = {"state": "waiting", "server": True, "ips": ["192.168.1.77"], "server_ip": "192.168.1.3", "port": 5201, "mode": "tcp_up", "secs": 10, "streams": 1, "rate": 50, "claimed": False, "bind": "192.168.1.77"}
+        mon.test = {"state": "waiting", "server": True, "ips": ["192.168.1.77"], "server_ip": "192.168.1.3", "port": 5201, "mode": "tcp_up", "secs": 10, "streams": 1, "rate": 50, "claimed": False, "bind": "192.168.1.77"}; mon.tests = [mon.test]
         self.assertEqual(mon.pending_for("10.20.0.9"), {"pending": False})                         # management address alone is not enough
         self.assertEqual(mon.pending_for("10.20.0.9", "192.168.1.5"), {"pending": False})         # a Wi-Fi IP that is not this client's
         j = mon.pending_for("10.20.0.9", "192.168.1.77"); self.assertTrue(j["pending"]); self.assertEqual(j["bind"], "192.168.1.77")

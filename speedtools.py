@@ -29,6 +29,7 @@ def find_iperf3(explicit=None):
     """Locate iperf3: an explicit file or folder, PATH, $IPERF3_PATH, beside this script, the current folder, then usual install places.
     Returns a full path, or None."""
     import glob, os
+    BAD.clear()                                              # the hint below describes this search only
     names = ["iperf3.exe"] if os.name == "nt" else ["iperf3"]
     def pick(d):
         for n in names:
@@ -54,12 +55,13 @@ def find_iperf3(explicit=None):
         elif d and os.path.isfile(d) and _runs(d): return d
     return None
 
-def iperf3_argv(ip, mode, secs, streams, rate_mbps, port=5201, bind=None):
+def iperf3_argv(ip, mode, secs, streams, rate_mbps, port=5201, bind=None, tcp_rate=None):
     ipaddress.ip_address(ip)                                   # never pass anything but a literal IP to the command line
     if mode not in MODES: raise ValueError(f"unknown iperf3 mode {mode}")
     argv = ["iperf3", "-c", ip, "-p", str(int(port)), "-t", str(int(secs)), "-P", str(int(streams)), "-J"]
     if mode.startswith("tcp") and secs >= 6: argv += ["-O", "2"]            # skip TCP slow start in the totals
     if mode.startswith("udp"): argv += ["-u", "-b", f"{float(rate_mbps):g}M"]
+    elif tcp_rate: argv += ["-b", f"{float(tcp_rate):g}M"]                  # TCP at a target rate instead of flat out
     if mode.endswith("up"): argv.append("-R")
     if bind: ipaddress.ip_address(bind); argv += ["-B", bind]       # source address: pins the route when this machine has several networks
     return argv
@@ -88,12 +90,13 @@ def parse_iperf3(text, mode):
         res.update(mbps=round((rcv.get("bits_per_second") or snd.get("bits_per_second", 0)) / 1e6, 2), retransmits=snd.get("retransmits"))
     return res
 
-def client_cmd(server_ip, port, mode, secs, streams, rate_mbps, bind=None):
+def client_cmd(server_ip, port, mode, secs, streams, rate_mbps, bind=None, tcp_rate=None):
     """The command the Wi-Fi client should run against the server PC."""
     ipaddress.ip_address(server_ip)
     c = f"iperf3 -c {server_ip}" + (f" -p {int(port)}" if int(port) != 5201 else "") + f" -t {int(secs)}"
     if int(streams) > 1: c += f" -P {int(streams)}"
     if mode.startswith("udp"): c += f" -u -b {float(rate_mbps):g}M"
+    elif tcp_rate: c += f" -b {float(tcp_rate):g}M"
     if mode.endswith("down"): c += " -R"
     if bind: ipaddress.ip_address(bind); c += f" -B {bind}"
     return c

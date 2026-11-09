@@ -33,6 +33,7 @@ def find_iperf3(explicit=None):
     """Locate iperf3: an explicit file or folder, PATH, $IPERF3_PATH, beside this script, the current folder, then usual install places.
     Returns a full path, or None."""
     import glob, os
+    BAD.clear()                                              # the hint below describes this search only
     names = ["iperf3.exe"] if os.name == "nt" else ["iperf3"]
     def pick(d):
         for n in names:
@@ -66,6 +67,7 @@ def build_argv(job, iperf_bin="iperf3", bind="auto"):
     argv = [iperf_bin, "-c", job["server_ip"], "-p", str(int(job["port"])), "-t", str(max(1, min(int(job["secs"]), 300)))]
     if int(job["streams"]) > 1: argv += ["-P", str(min(int(job["streams"]), 16))]
     if mode.startswith("udp"): argv += ["-u", "-b", f"{float(job['rate']):g}M"]
+    elif job.get("tcp_rate"): argv += ["-b", f"{float(job['tcp_rate']):g}M"]       # TCP at the requirement's rate, not flat out
     if mode.endswith("down"): argv.append("-R")
     src = job.get("bind") if bind == "auto" else bind               # -B: the Wi-Fi address, so the test leaves by the right network
     if src: ipaddress.ip_address(src); argv += ["-B", src]
