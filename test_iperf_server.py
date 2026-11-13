@@ -204,6 +204,11 @@ class SourceBindingReal(unittest.TestCase):
         try: r = s.run_iperf3("127.0.0.1", "tcp_down", 2, 1, 1, port=5750, bind="127.0.0.1"); self.assertTrue(r["ok"], r); self.assertGreater(r["mbps"], 100)
         finally: srv.kill()
 
+class BindCheck(unittest.TestCase):
+    def test_unowned_address_is_explained(self):
+        import iperf_agent as ia
+        self.assertIsNone(ia.bind_problem("127.0.0.1")); self.assertIn("no network adapter", ia.bind_problem("192.0.2.123"))
+
 class FindArchive(unittest.TestCase):
     def test_a_zip_is_not_mistaken_for_the_program(self):
         import tempfile, os, speedtools as st

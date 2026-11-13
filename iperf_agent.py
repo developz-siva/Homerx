@@ -61,6 +61,22 @@ def find_iperf3(explicit=None):
         elif d and os.path.isfile(d) and _runs(d): return d
     return None
 
+def local_ips():
+    """IPv4 addresses configured on this PC (best effort, standard library only)."""
+    out = set()
+    try: out |= {i[4][0] for i in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET)}
+    except OSError: pass
+    ip = lan_ip()
+    if ip: out.add(ip)
+    return sorted(out)
+
+def bind_problem(ip):
+    """None if this PC can listen on `ip`, else a readable reason."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try: s.bind((ip, 0)); return None
+    except OSError as e: return f"this PC has no network adapter with the address {ip} ({e}). Addresses it does have: {', '.join(local_ips()) or 'unknown'}. Check with ipconfig, or fix the address."
+    finally: s.close()
+
 def lan_ip():
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try: s.connect(("10.255.255.255", 1)); return s.getsockname()[0]       # picks the LAN interface; sends nothing
@@ -117,7 +133,7 @@ class Agent:
                 except ValueError: err_json = "unparseable output from iperf3"
             if err_json and ("in use" in err_json or "unable to start" in err_json):     # we cannot listen at all: say so, back off
                 self._set(port, "error", err_json)
-                sys.stderr.write(f"iperf3: {err_json}  (another iperf3 server on port {port}? stop it, or use --iperf-port)\n"); time.sleep(3)
+                sys.stderr.write(f"iperf3: {err_json}  (" + (f"{self.bind} is not an address of this PC: check ipconfig, or drop --iperf-bind" if "assign requested address" in str(err_json) else f"another iperf3 server on port {port}? stop it, or use --iperf-port") + ")\n"); time.sleep(3)
             elif err_json:                                                                  # e.g. the client aborted mid-test: nothing to score
                 print(time.strftime("%H:%M:%S"), "test aborted:", err_json, flush=True); time.sleep(0.3)
             elif out.strip():
@@ -177,6 +193,9 @@ def main():
     ap.add_argument("--bind", default="0.0.0.0", help="HTTP bind address (default all interfaces so the dashboard PC can reach it)")
     ap.add_argument("--token", help="optional shared secret; the dashboard must be started with the same --iperf-token")
     a = ap.parse_args()
+    if a.iperf_bind:
+        why = bind_problem(a.iperf_bind)
+        if why: sys.exit(f"--iperf-bind: {why}")
     agent = Agent(a.iperf_port, iperf_bin=a.iperf_bin, token=a.token, bind=a.iperf_bind, slots=a.slots)
     agent.start()
     ip = a.iperf_bind or lan_ip() or "<this PC's IP>"
