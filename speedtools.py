@@ -13,9 +13,12 @@ MODES = {"tcp_down": "TCP download (host → client)", "tcp_up": "TCP upload (cl
 
 BAD = {}                                                    # candidate path -> why it cannot be run
 
+ARCHIVES = (".zip", ".tar", ".gz", ".tgz", ".7z", ".rar", ".bz2", ".xz")
+
 def _runs(p):
     """True if `p --version` can be started. A file that exists but is not a program for this OS (WinError 193) is skipped, and remembered in BAD."""
     import subprocess
+    if p.lower().endswith(ARCHIVES): BAD[p] = "archive"; return False
     try: subprocess.run([p, "--version"], capture_output=True, timeout=10); return True
     except subprocess.TimeoutExpired: return True
     except OSError as e: BAD[p] = str(e); return False
@@ -23,6 +26,7 @@ def _runs(p):
 def bad_hint():
     if not BAD: return ""
     p, why = next(iter(BAD.items()))
+    if why == "archive": return f" Found {p}, which is a compressed archive. Extract (unzip) it first, then start the agent with --iperf-bin \"<extracted folder>\" (the folder that contains iperf3.exe), or put that folder on PATH."
     return (f" Found {p} but it cannot be run ({why})." + (" That is not a Windows program: download the Windows build of iperf3 (iperf3.exe with its cygwin1.dll), not a Linux/macOS file or a source zip." if "193" in why else ""))
 
 def find_iperf3(explicit=None):

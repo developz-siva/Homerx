@@ -204,6 +204,13 @@ class SourceBindingReal(unittest.TestCase):
         try: r = s.run_iperf3("127.0.0.1", "tcp_down", 2, 1, 1, port=5750, bind="127.0.0.1"); self.assertTrue(r["ok"], r); self.assertGreater(r["mbps"], 100)
         finally: srv.kill()
 
+class FindArchive(unittest.TestCase):
+    def test_a_zip_is_not_mistaken_for_the_program(self):
+        import tempfile, os, speedtools as st
+        with tempfile.TemporaryDirectory() as d:
+            z = os.path.join(d, "iperf3.20_64.zip"); open(z, "wb").write(b"PK")
+            self.assertIsNone(st.find_iperf3(z)); self.assertIn("Extract", st.bad_hint()); self.assertIn("--iperf-bin", st.bad_hint())
+
 class FindIperf3(unittest.TestCase):
     def _fake(self, d, name="iperf3"):
         p = os.path.join(d, name); open(p, "w").write("#!/bin/sh\necho fake\n"); os.chmod(p, 0o755); return p
