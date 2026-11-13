@@ -184,6 +184,7 @@ def main():
           "\nOn a Wi-Fi client run:  iperf3 -c " + ip + "   (add -R for download, -u -b 50M for UDP)\nCtrl-C to stop.", flush=True)
     try: make_server(agent, a.bind, a.http_port).serve_forever()
     except KeyboardInterrupt: pass
+    finally: agent.stop()                                   # close every iperf3 server this agent started
 
 if __name__ == "__main__":
     main()
