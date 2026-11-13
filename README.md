@@ -2,6 +2,8 @@
 
 Per-client traffic, Tx rate and app/QoS class, plus per-radio channel utilization, measured on the AP.
 
+Commands at a glance: see [CHEATSHEET.md](CHEATSHEET.md).
+
 ## Run
     python3 wifi_monitor.py --backend sim --once --interval 2          # try it with no hardware
     python3 wifi_monitor.py --backend iw  --host 192.168.1.1 --log-dir logs     # OpenWrt / prplOS / mac80211 RDK-B
