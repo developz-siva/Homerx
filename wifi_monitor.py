@@ -16,7 +16,7 @@ Traffic per client + app/QoS class comes from conntrack byte counters (needs nf_
 import argparse, csv, json, os, random, re, shlex, socket, subprocess, sys, threading, time
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-import capture, discovery, memwatch, planner, report, speedtools
+import capture, discovery, memwatch, pingmon, planner, report, speedtools
 from transport import Runner, SerialRunner, SshPasswordRunner, TelnetRunner, UbusHttpRunner
 import urllib.parse
 from urllib.parse import urlparse, parse_qs
@@ -454,6 +454,7 @@ class Monitor:
         self.rssi_hist, self.mix_hist = {}, {}
         self.prev_surv, self.prev_flow, self.prev_sta, self.prev_bytes = {}, None, {}, {}
         self.cap = {"state": "idle"}
+        self.pingmon = pingmon.PingMonitor()
         self.last_t = None
         self.test, self.tests, self.iperf_from, self.allow_remote_tests, self.iperf_port = None, [], "host", False, 5201
         self.iperf_src, self.bind_client, self.iperf_bin = None, True, None      # iperf_src: -B for tests run from the dashboard; bind_client: put -B <client IP> in the client command
@@ -725,6 +726,7 @@ class Monitor:
                 t["cmd"] = speedtools.client_cmd(sip, t["port"], mode, secs, streams, rate, t["bind"], tcp_rate); gi += 1
             tests.append(t)
         for t in tests: t["multi"] = True
+        pn = self._start_ping(req.get("ping"), tests)
         self.test, self.tests = tests[0], tests
         gate = [t for t in tests if t["tool"] == "iperf3"]
         for t in tests:
@@ -732,7 +734,32 @@ class Monitor:
                 t["state"] = "waiting" if gate else "running"          # with iperf rows, watching starts once the armed clients have started
                 threading.Thread(target=self._observe, args=(t, gate), daemon=True).start()
             else: threading.Thread(target=self._wait_test, args=(t,), daemon=True).start()
-        return {"ok": True, "count": len(tests), "observing": sum(t["tool"] == "observe" for t in tests), "iperf": len(gate)}
+        return {"ok": True, "count": len(tests), "observing": sum(t["tool"] == "observe" for t in tests), "iperf": len(gate), "ping_targets": pn}
+
+    HOST_OK = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.\-]{0,252}$")
+
+    def _start_ping(self, cfg, tests):
+        """Ping the gateway / AP, WAN hosts and every client in the run for as long as the run lasts (see pingmon.py). cfg = {"on", "lan": [...], "wan": [...]}."""
+        self.pingmon.stop()
+        if not isinstance(cfg, dict) or not cfg.get("on"): return 0
+        if self.pingmon.ping_fn is pingmon.ping_once and not pingmon.have_ping(): return 0          # no `ping` program on this PC
+        def hosts(v): return [h.strip() for h in (v if isinstance(v, list) else re.split(r"[,\s;]+", str(v or ""))) if h and h.strip() and self.HOST_OK.match(h.strip())]
+        lan = hosts(cfg.get("lan"))
+        if not lan:
+            gw = pingmon.default_gateway()
+            if gw: lan.append(gw)
+            ap = (self.conn or {}).get("host")
+            if ap and self.HOST_OK.match(str(ap)) and ap not in lan: lan.append(ap)
+        wan = hosts(cfg.get("wan")) if cfg.get("wan") not in (None, "") else ["8.8.8.8", "1.1.1.1"]
+        targets = [("Gateway " + h if i == 0 and len(lan) > 1 else "LAN " + h, h, "lan") for i, h in enumerate(lan)] + [("WAN " + h, h, "wan") for h in wan]
+        targets += [(t.get("host") or t["ip"], t["ip"], "client") for t in tests if t.get("ip") and self.HOST_OK.match(t["ip"])]
+        n = self.pingmon.start(targets)
+        pm = self.pingmon
+        def guard():                                                    # stop pinging once every test of this run has finished
+            while pm.running and any(t["state"] in ("waiting", "running") for t in tests): time.sleep(0.5)
+            time.sleep(1.0); pm.stop() if pm.running else None
+        threading.Thread(target=guard, daemon=True).start()
+        return n
 
     def _observe(self, t, gate):
         while gate and not t["cancel"] and any(g["state"] == "waiting" and not g["claimed"] for g in gate) and time.time() < max(g["deadline"] for g in gate): time.sleep(0.5)
@@ -875,7 +902,7 @@ class Monitor:
         states = [t["state"] for t in self.tests]
         agg = "waiting" if "waiting" in states else "running" if "running" in states else "done"
         return {"state": agg, "multi": True, "tests": rows, "summary": _multi_summary(self.tests) if agg == "done" else None,
-                "remaining": max([r.get("remaining") or 0 for r in rows] or [0])}
+                "remaining": max([r.get("remaining") or 0 for r in rows] or [0]), "ping": self.pingmon.snapshot() if self.pingmon.targets else None}
 
     def start_capture(self, path, name, remove=True):
         """Analyse an uploaded pcap / pcapng in the background (see capture.py). One at a time; progress via capture_status()."""
@@ -911,6 +938,7 @@ class Monitor:
     def cancel_test(self):
         armed = [t for t in self.tests if t["state"] == "waiting" or (t["tool"] == "observe" and t["state"] == "running")]
         for t in armed: t["cancel"] = True
+        self.pingmon.stop()
         return {"ok": True} if armed else {"error": "No armed test to cancel."}
 
     def config(self):
@@ -1005,7 +1033,7 @@ class Monitor:
             self.state = {"ts": 0, "radios": [], "clients": [], "summary": {}}
             t = cfg.get("transport") or "ssh"
             where = {"serial": cfg.get("serial_port"), "ubus": cfg.get("http_url"), "local": "this computer", "sim": "demo data"}.get(t) or (cfg.get("host") or "on this machine")
-            self.conn = {"state": "connected", "error": "", "info": {"transport": t, "backend": info["backend"], "ifaces": res["ifaces"]}, "label": f"{t} · {where}"}
+            self.conn = {"state": "connected", "error": "", "info": {"transport": t, "backend": info["backend"], "ifaces": res["ifaces"]}, "label": f"{t} · {where}", "host": cfg.get("host") if t in ("ssh", "telnet") else None}
             if old and old is not runner: close_runner(old)
             self.iperf_server = (cfg.get("iperf_server") or "").strip() or None
             self.iperf_token = (cfg.get("iperf_token") or "").strip() or self.iperf_token
@@ -1191,7 +1219,7 @@ th{color:var(--mut);font-weight:500}.mut{color:var(--mut)}.tag{display:inline-bl
 <label>&nbsp;<span><button id=msave>Save</button> <button id=mload>Load</button> <button id=mdel>Delete</button></span></label></div>
 <div style="max-height:460px;overflow:auto"><table id=mt><tr><th>Client</th><th>Doing</th><th>Quality / test</th><th>&times;</th><th class=iph>How</th><th class=iph>UDP Mbps</th><th></th></tr></table></div>
 <div class=ctl style="margin-top:10px"><label>Duration (s)<input id=md type=number value=15 min=5 max=120 style="min-width:80px"></label>
-<label class=iph>Demand (iperf rows)<select id=mdem><option value=target>Exactly what each needs</option><option value=max>Flat out (shows headroom)</option></select></label>
+<label title="Ping the gateway, the internet and every client in this run for the whole test, and graph it"><span>Ping during test</span><input id=mping type=checkbox checked style="min-width:0;width:auto"></label><label>Gateway / LAN to ping<input id=mlan placeholder="auto (default gateway + AP)" style="min-width:170px"></label><label>Internet hosts<input id=mwan value="8.8.8.8, 1.1.1.1" style="min-width:150px"></label><label class=iph>Demand (iperf rows)<select id=mdem><option value=target>Exactly what each needs</option><option value=max>Flat out (shows headroom)</option></select></label>
 <label>&nbsp;<span><button id=mrun style="font:inherit;padding:7px 16px;border-radius:6px;border:0;background:var(--a);color:#fff;cursor:pointer">Run all</button> <span id=mcount class=mut></span></span></label></div>
 <div id=mres></div><div id=pr style="margin-top:12px"></div></div>
 <div class=grid id=radios></div><div class=card style="margin-top:14px"><h2>Traffic by class (Mbps)</h2><div id=cls></div></div>
@@ -1273,6 +1301,22 @@ $('capgo').disabled=true;$('capres').innerHTML='';$('capmsg').textContent='Uploa
 try{const r=await (await fetch('api/capture',{method:'POST',headers:{'Content-Type':'application/octet-stream','X-Filename':encodeURIComponent(f.name)},body:f})).json();
 if(r.error){$('capgo').disabled=false;$('capmsg').textContent='';$('capres').innerHTML='<div class=hot>\u2716 '+esc(r.error)+'</div>';return}}catch(e){$('capgo').disabled=false;$('capmsg').textContent='Upload failed.';return}
 capPoll()}
+
+const PC={lan:['#2a6fdb','#5b8def','#8fb2f7'],wan:['#f79009','#d92d20','#b54708'],client:['#12b76a','#7a5af8','#0e9384','#c4320a','#667085','#dd2590','#4e5ba6','#6ce9a6']};
+function lchart(box,ts,title){ts=ts.filter(t=>t.samples.length);if(!ts.length)return'';const W=1000,H=260,L=48,R=12,T=10,B=24,pw=W-L-R,ph=H-T-B;
+let tmax=Math.max(...ts.map(t=>t.samples[t.samples.length-1][0]),1),vals=ts.flatMap(t=>t.samples.map(s=>s[1]).filter(v=>v!=null)),top=Math.max(10,Math.ceil(Math.max(...vals,1)*1.15/10)*10);
+const X=t=>L+pw*t/tmax,Y=v=>T+ph*(1-Math.min(v,top)/top);let s=`<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto"><rect x=0 y=0 width=${W} height=${H} fill=none />`;
+for(let i=0;i<=4;i++){const v=top*i/4,y=Y(v);s+=`<line x1=${L} x2=${W-R} y1=${y} y2=${y} stroke="currentColor" opacity=.12 /><text x=${L-6} y=${y+4} text-anchor=end font-size=11 fill="currentColor" opacity=.6>${Math.round(v)}</text>`}
+for(let i=0;i<=5;i++){const t=tmax*i/5;s+=`<text x=${X(t)} y=${H-6} text-anchor=middle font-size=11 fill="currentColor" opacity=.6>${Math.round(t)}s</text>`}
+const cnt={};ts.forEach(t=>{const k=t.group,i=cnt[k]=(cnt[k]||0)+1,c=(PC[k]||PC.client)[(i-1)%(PC[k]||PC.client).length];t._c=c;let d='',pen=false;
+t.samples.forEach(p=>{if(p[1]==null){pen=false;s+=`<line x1=${X(p[0])} x2=${X(p[0])} y1=${H-B-8} y2=${H-B} stroke="#d92d20" stroke-width=2 />`}else{d+=(pen?'L':'M')+X(p[0]).toFixed(1)+' '+Y(p[1]).toFixed(1);pen=true}});
+s+=`<path d="${d}" fill=none stroke="${c}" stroke-width=1.6 />`});
+s+='</svg><div class=lg style="display:flex;flex-wrap:wrap;gap:4px 14px;font-size:12px">'+ts.map(t=>`<span><i style="display:inline-block;width:10px;height:10px;border-radius:2px;background:${t._c};margin-right:4px"></i>${esc(t.name)}</span>`).join('')+'<span><i style="display:inline-block;width:3px;height:10px;background:#d92d20;margin-right:4px"></i>lost packet</span></div>';
+return `<h3 style="margin:14px 0 4px">${title} <span class=mut style="font-weight:normal">(round-trip ms)</span></h3>`+s}
+function pingRender(p){if(!p||!p.targets.length)return'';let h='<h2 style="margin-top:22px">Ping during the test'+(p.running?' <span class=mut>(running ... '+Math.round(p.elapsed)+' s)</span>':'')+'</h2>';
+h+=lchart('',p.targets.filter(t=>t.group!=='client'),'Gateway / AP and internet')+lchart('',p.targets.filter(t=>t.group==='client'),'Clients');
+h+='<div style="overflow:auto"><table style="margin-top:10px"><tr><th>Target<th>Sent<th>Lost<th>Min<th>Avg<th>p95<th>Max<th>Jitter</tr>'+p.targets.map(t=>{const s=t.stats,bad=s.loss_pct>=2;return `<tr><td>${esc(t.name)}<td>${s.sent}<td${bad?' class=hot':''}>${s.lost} (${s.loss_pct}%)<td>${s.min??'–'}<td>${s.avg??'–'}<td>${s.p95??'–'}<td>${s.max??'–'}<td>${s.jitter??'–'}</tr>`}).join('')+'</table></div>';
+if(p.findings.length)h+='<div style="margin-top:8px">'+p.findings.map(i=>row('',i)).join('')+'</div>';return h}
 let SRV=false;
 async function boot(){try{CAT=await (await fetch('api/catalog')).json();SRV=(await (await fetch('api/config')).json()).iperf_server}catch(e){return}
 $('capgo').onclick=capGo;$('madd').onclick=()=>maddRow();$('mrun').onclick=mrun;$('mpapply').onclick=mapply;$('mall').onclick=mall;$('mclear').onclick=()=>msetRows([]);mpatInit();scenList();
@@ -1303,9 +1347,10 @@ function scen(){try{return JSON.parse(localStorage.getItem('wm_scen')||'{}')}cat
 function scenSave(o){try{localStorage.setItem('wm_scen',JSON.stringify(o))}catch(e){}}
 function scenList(){$('msl').innerHTML=Object.keys(scen()).map(k=>`<option>${esc(k)}</option>`).join('')||'<option value="">(none saved)</option>'}
 async function mrun(){const b=$('mrun');if(b.dataset.cancel){await fetch('api/test/cancel',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});return}
+const ping={on:$('mping').checked,lan:$('mlan').value,wan:$('mwan').value};
 const items=mrows().filter(r=>r.traffic!=='idle'&&(r.mac||r.ip)).map(r=>({...r,mac:r.ip?'':r.mac}));
 if(!items.length){$('mres').innerHTML='<div class=hot>Add at least one client that is not set to Idle.</div>';return}
-let r;try{r=await (await fetch('api/test/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({items,secs:+$('md').value,demand:$('mdem').value})})).json()}catch(e){$('mres').textContent='Could not start the tests.';return}
+let r;try{r=await (await fetch('api/test/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({items,secs:+$('md').value,demand:$('mdem').value,ping})})).json()}catch(e){$('mres').textContent='Could not start the tests.';return}
 if(r.error){$('mres').innerHTML='<div class=hot>\u2716 '+esc(r.error)+'</div>';return}$('mres').textContent='Starting\u2026';tstat()}
 const GC={GOOD:'#12b76a',MARGINAL:'#f79009',BAD:'#d92d20','NO TRAFFIC':'#667085'};
 function badge(g){return `<span style="display:inline-block;padding:2px 10px;border-radius:12px;color:#fff;font-weight:600;background:${GC[g]||'#667085'}">${esc(g)}</span>`}
@@ -1324,7 +1369,7 @@ h+='</table>';const m=s.summary;
 if(m)h+='<div style="margin-top:10px"><a href="api/test/report.pdf" download style="padding:6px 14px;border-radius:6px;background:var(--a);color:#fff;text-decoration:none">Download PDF report</a></div>';
 if(m){h+=`<div style="margin-top:10px">${badge(m.grade)} <b>${m.good}</b> good, <b>${m.marginal}</b> marginal, <b>${m.bad}</b> bad`+(m.no_traffic?`, <b>${m.no_traffic}</b> with no traffic (app not started?)`:'')+((m.no_result-m.no_traffic)>0?`, <b>${m.no_result-m.no_traffic}</b> no result`:'')+(m.load_only?`, ${m.load_only} iperf load`:'')+` &middot; total ${m.measured_total} Mbps delivered, ${m.required_total} Mbps needed`+(m.overlap_s!=null?` &middot; ran together for ${m.overlap_s}s`:'')+(m.util_max?` &middot; radio up to ${m.util_max}% busy`:'')+'</div>'
 +(m.overlap_s!=null&&m.overlap_s<3?'<div class=hot>The tests barely overlapped - start the helpers on every client first, then press Run all.</div>':'')}
-$('mres').innerHTML=h}
+h+=pingRender(s.ping);$('mres').innerHTML=h}
 async function tstat(){let s;try{s=await (await fetch('api/test/status')).json()}catch(e){return}if(s.state==='idle'||!s.multi)return;mrender(s)}
 const _t=tick;tick=async function(){await _t();try{const s=await (await fetch('api/state')).json();if(!s.ts)return;insights(s);fillClients(s);plan()}catch(e){}};
 boot();tick();setInterval(tick,3000);</script></body></html>"""

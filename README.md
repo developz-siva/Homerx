@@ -103,6 +103,12 @@ Set a row's **Doing** to **Idle – not in this test** to keep a connected clien
 
 When a run finishes, **Download PDF report** (under the results) saves a one-click report: overall grade, per-client need vs measured, link stats and the reasons.
 
+### Ping during the test (LAN + WAN)
+Tick **Ping during test** (on by default) and the dashboard PC pings, once a second for as long as the run lasts: the default gateway and the AP (or the address you type under *Gateway / LAN to ping*),
+the internet hosts you list (default 8.8.8.8 and 1.1.1.1), and every client in the run. Results show as two graphs (gateway / internet, and clients; red ticks = lost packets) plus a table of
+sent / lost / min / avg / p95 / max / jitter, a plain-language finding (gateway slow = problem inside your network; gateway fine but internet slow = modem / ISP side), and they are included in the PDF report.
+The pings leave from the PC that runs the dashboard, using whichever network card Windows picks (see CHEATSHEET.md for forcing Wi-Fi only).
+
 ### Watch real traffic (default) vs generate with iperf3
 Each row has a **How** choice. **Watch real traffic** (default for audio / video / call / game / IoT rows) sends nothing and installs nothing on the client:
 start the real app on the device (Netflix on the TV, Spotify on the phone, a Teams call on the laptop), press **Run all**, and for the chosen time the dashboard

@@ -119,7 +119,7 @@ class Concurrent(unittest.TestCase):
                  {"ip": "127.0.0.3", "traffic": "teams", "quality": "1:1 video, recommended (≈1.6 Mbps)", "streams": 1},
                  {"ip": "127.0.0.4", "traffic": "voice", "quality": "G.711 (80 kbps)", "streams": 1}]
         items = [dict(i, method="iperf") for i in items]
-        self.assertEqual(self.mon.start_multi({"items": items, "secs": 5, "demand": "target"}), {"ok": True, "count": 3, "observing": 0, "iperf": 3})
+        self.assertEqual(self.mon.start_multi({"items": items, "secs": 5, "demand": "target"}), {"ok": True, "count": 3, "observing": 0, "iperf": 3, "ping_targets": 0})
         self.assertEqual([t["port"] for t in self.mon.tests], [self.PORT, self.PORT + 1, self.PORT + 2])
         self.assertAlmostEqual(self.mon.tests[0]["required"], 6.0); self.assertIn("-b 6M", self.mon.tests[0]["cmd"]); self.assertIn(f"-p {self.PORT}", self.mon.tests[0]["cmd"])
         out = {}; th = [threading.Thread(target=self.helper, args=(ip, out)) for ip in ("127.0.0.2", "127.0.0.3")]
@@ -139,7 +139,7 @@ class Concurrent(unittest.TestCase):
         items = [{"ip": "127.0.0.2", "traffic": "spotify", "quality": "Very High (320 kbps)", "method": "iperf"},
                  {"ip": "127.0.0.3", "traffic": "iperf3", "quality": s.MODES["tcp_down"], "streams": 2},
                  {"ip": "127.0.0.4", "traffic": "iperf3", "quality": s.MODES["udp_up"], "rate": 20}]
-        self.assertEqual(self.mon.start_multi({"items": items, "secs": 5}), {"ok": True, "count": 3, "observing": 0, "iperf": 3})
+        self.assertEqual(self.mon.start_multi({"items": items, "secs": 5}), {"ok": True, "count": 3, "observing": 0, "iperf": 3, "ping_targets": 0})
         a, b, c = self.mon.tests
         self.assertIsNone(b["required"]); self.assertIn("-P 2", b["cmd"]); self.assertNotIn(" -b ", b["cmd"]); self.assertIn("-u -b 20M", c["cmd"]); self.assertIn("-b 0.32M", a["cmd"])
         out = {}; th = [threading.Thread(target=self.helper, args=(ip, out)) for ip in ("127.0.0.2", "127.0.0.3", "127.0.0.4")]
